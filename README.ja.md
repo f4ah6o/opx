@@ -6,6 +6,7 @@
 
 * キーワード検索でアイテムを検索
 * 1Password アイテムの secret を環境変数としてコマンド実行
+* `gen` サブコマンドで env ファイル生成（既存ファイルに追記、重複キーは上書き）
 * 繰り返し実行を高速化するアイテムリストのキャッシュ
 * 完全一致がない場合のファジーマッチ
 
@@ -42,24 +43,48 @@ opz find baz
 1Password アイテムの secret を環境変数としてコマンドを実行:
 
 ```bash
-opz [OPTIONS] <ITEM> -- <COMMAND>...
+opz [OPTIONS] <ITEM> [ENV] -- <COMMAND>...
 ```
 
 オプション:
 * `--vault <NAME>` - Vault 名（省略時はすべての Vault を検索）
-* `--env-file <PATH>`（別名: `--out`） - 出力 env ファイルパス（デフォルト: `.env`）
-* `--keep` - 生成された env ファイルを残す
+
+引数:
+* `<ITEM>` - secret を取得するアイテムタイトル
+* `[ENV]` - 出力 env ファイルパス（デフォルト: `.env`）
+
+env ファイルはコマンド実行後も保持されます。既存ファイルがある場合は追記され、重複キーは上書きされます。
 
 例:
 ```bash
 # "example-item" アイテムの secret で claude を実行
 opz example-item -- claude "hello"
 
-# デバッグ用に env ファイルを残す
-opz --keep example-item -- env
+# カスタム env ファイルパスを指定
+opz example-item .env.local -- your-command
 
-# Vault を指定して env ファイルを残す
-opz --vault Private --keep example-item -- your-command
+# Vault を指定
+opz --vault Private example-item -- your-command
+```
+
+### Env ファイル生成
+
+コマンド実行なしで env ファイルのみを生成:
+
+```bash
+opz gen <ITEM> [ENV]
+```
+
+例:
+```bash
+# .env ファイルを生成
+opz gen example-item
+
+# カスタムパスに生成
+opz gen example-item .env.production
+
+# Vault を指定
+opz --vault Private gen example-item
 ```
 
 ## 仕組み
@@ -67,9 +92,10 @@ opz --vault Private --keep example-item -- your-command
 1. 1Password からアイテムリストを取得（60秒間キャッシュ）
 2. タイトルで一致するアイテムを検索（完全一致またはファジーマッチ）
 3. 各フィールドを `op://<vault>/<item>/<field>` 参照に変換
-4. 参照を書いた一時 `.env` ファイルを作成
+4. `.env` ファイルに参照を書き込み（既存ファイルにマージ、重複キーは上書き）
 5. `op run --env-file=...` 経由でコマンドを実行（秘密は `op` が解決）
-6. env ファイルを削除（`--keep` 指定時を除く）
+
+`gen` サブコマンドの場合、ステップ 1-4 のみ実行されます（コマンド実行なし）。
 
 ## `op` コマンドの利用
 
@@ -90,13 +116,11 @@ sequenceDiagram
     op-->>opz: {fields: [{label, value}, ...]}
     Note over opz: env 参照に変換<br/>(API_KEY="op://vault/item/API_KEY", ...)
 
-    opz->>opz: .env env ファイルを書き込み
+    opz->>opz: .env に書き込み（既存とマージ）
 
     opz->>op: op run --env-file=.env -- claude "hello"
     Note over op: secret を注入して実行
     op-->>opz: 終了ステータス
-
-    opz->>opz: .env を削除（`--keep` を除く）
 ```
 
 **セキュリティ**: `opz` は secret へのアクセスと認証をすべて `op` CLI に委任します。アイテムリストはメタデータのみを 60 秒間キャッシュします。

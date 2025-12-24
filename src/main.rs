@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom, Write},
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, SystemTime},
@@ -20,25 +20,16 @@ struct Cli {
     #[arg(long, global = true)]
     vault: Option<String>,
 
-    /// Output env file path (default: .env in current dir)
-    #[arg(
-        long = "env-file",
-        alias = "out",
-        global = true,
-        default_value = ".env"
-    )]
-    env_file: PathBuf,
-
-    /// Keep the generated env file
-    #[arg(long, global = true)]
-    keep: bool,
-
     #[command(subcommand)]
     cmd: Option<Cmd>,
 
-    /// Item title (when not using 'find' subcommand)
+    /// Item title (when not using subcommand)
     #[arg(value_name = "ITEM")]
     item_title: Option<String>,
+
+    /// Output env file path (default: .env)
+    #[arg(value_name = "ENV")]
+    env_file: Option<PathBuf>,
 
     /// Command to run (after --)
     #[arg(last = true)]
@@ -49,6 +40,17 @@ struct Cli {
 enum Cmd {
     /// Find items by keyword (title contains)
     Find { query: String },
+
+    /// Generate env file only (do not run command). Appends to existing file, overwrites duplicate keys.
+    Gen {
+        /// Item title
+        #[arg(value_name = "ITEM")]
+        item: String,
+
+        /// Output env file path (default: .env)
+        #[arg(value_name = "ENV")]
+        env_file: Option<PathBuf>,
+    },
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -93,23 +95,34 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Cmd::Gen { item, env_file }) => {
+            let env_path = env_file
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(".env"));
+            generate_env_file(&cli, item, &env_path)
+        }
         None => {
-            // Default: run mode
             let item_title = cli.item_title.as_ref().ok_or_else(|| {
-                anyhow!("Item title required. Usage: opz [OPTIONS] <ITEM> -- <COMMAND>...")
+                anyhow!("Item title required. Usage: opz [OPTIONS] <ITEM> [ENV] -- <COMMAND>...")
             })?;
+            let env_file = cli
+                .env_file
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(".env"));
+
             if cli.command.is_empty() {
                 return Err(anyhow!(
-                    "Command required after '--'. Usage: opz [OPTIONS] <ITEM> -- <COMMAND>..."
+                    "Command required after '--'. Usage: opz [OPTIONS] <ITEM> [ENV] -- <COMMAND>..."
                 ));
             }
-            run_with_item(&cli, item_title, &cli.command)
+            run_with_item(&cli, item_title, &env_file, &cli.command)
         }
     }
 }
 
-fn run_with_item(cli: &Cli, item_title: &str, command: &[String]) -> Result<()> {
-    let items = item_list_cached(cli.vault.as_deref())?;
+/// Find and match item by title, returns (item_id, vault_name, item_title)
+fn find_item(vault: Option<&str>, item_title: &str) -> Result<(String, String, String)> {
+    let items = item_list_cached(vault)?;
 
     let mut matches: Vec<ItemListEntry> = items
         .into_iter()
@@ -119,7 +132,7 @@ fn run_with_item(cli: &Cli, item_title: &str, command: &[String]) -> Result<()> 
     // If exact match not found, fallback to contains (simple fuzzy)
     if matches.is_empty() {
         let q = item_title.to_lowercase();
-        matches = item_list_cached(cli.vault.as_deref())?
+        matches = item_list_cached(vault)?
             .into_iter()
             .filter(|x| x.title.to_lowercase().contains(&q))
             .collect();
@@ -139,30 +152,37 @@ fn run_with_item(cli: &Cli, item_title: &str, command: &[String]) -> Result<()> 
         ));
     }
 
-    let item_id = &matches[0].id;
-    let item = item_get(item_id)?;
+    let item_id = matches[0].id.clone();
+    let item = item_get(&item_id)?;
     let vault_name = matches
-        .get(0)
+        .first()
         .and_then(|m| m.vault.as_ref())
         .or_else(|| item.vault.as_ref())
         .map(|v| v.name.clone())
         .ok_or_else(|| anyhow!("Vault name is required. Try specifying --vault."))?;
 
-    let env_lines = item_to_env_lines(&item, &vault_name, &matches[0].title)?;
+    Ok((item_id, vault_name, matches[0].title.clone()))
+}
 
-    let existing_env_content = if cli.env_file.exists() {
-        Some(
-            fs::read(&cli.env_file)
-                .with_context(|| format!("failed to read {}", cli.env_file.display()))?,
-        )
-    } else {
-        None
-    };
+fn generate_env_file(cli: &Cli, item_title: &str, env_file: &Path) -> Result<()> {
+    let (item_id, vault_name, matched_title) = find_item(cli.vault.as_deref(), item_title)?;
+    let item = item_get(&item_id)?;
+    let env_lines = item_to_env_lines(&item, &vault_name, &matched_title)?;
+    write_env_file(env_file, &env_lines)?;
+    eprintln!("Generated: {}", env_file.display());
+    Ok(())
+}
 
-    write_env_file(&cli.env_file, &env_lines)?;
+fn run_with_item(cli: &Cli, item_title: &str, env_file: &Path, command: &[String]) -> Result<()> {
+    let (item_id, vault_name, matched_title) = find_item(cli.vault.as_deref(), item_title)?;
+    let item = item_get(&item_id)?;
+    let env_lines = item_to_env_lines(&item, &vault_name, &matched_title)?;
+
+    write_env_file(env_file, &env_lines)?;
+
     let status = Command::new("op")
         .arg("run")
-        .arg(format!("--env-file={}", cli.env_file.display()))
+        .arg(format!("--env-file={}", env_file.display()))
         .arg("--")
         .args(command)
         .stdin(Stdio::inherit())
@@ -170,17 +190,6 @@ fn run_with_item(cli: &Cli, item_title: &str, command: &[String]) -> Result<()> 
         .stderr(Stdio::inherit())
         .status()
         .context("failed to run `op run`")?;
-
-    if !cli.keep {
-        match existing_env_content {
-            Some(original) => {
-                let _ = fs::write(&cli.env_file, original);
-            }
-            None => {
-                let _ = fs::remove_file(&cli.env_file);
-            }
-        }
-    }
 
     if !status.success() {
         return Err(anyhow!("command failed with status: {}", status));
@@ -221,38 +230,64 @@ fn escape_env_value(s: &str) -> String {
         .replace('\r', "\\r")
 }
 
-fn write_env_file(path: &Path, lines: &[String]) -> Result<()> {
-    let mut f = if path.exists() {
-        let mut f = fs::OpenOptions::new()
-            .read(true)
-            .append(true)
-            .open(path)
-            .with_context(|| format!("open {}", path.display()))?;
+/// Parse env line to extract key name (e.g., "KEY=value" -> "KEY")
+fn parse_env_key(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    trimmed.split('=').next()
+}
 
-        // Ensure we start appending on a new line
-        let needs_newline = {
-            let meta = f.metadata()?;
-            if meta.len() == 0 {
-                false
+fn write_env_file(path: &Path, new_lines: &[String]) -> Result<()> {
+    use std::collections::HashMap;
+
+    // Build a map of new keys for quick lookup
+    let new_keys: HashMap<String, &str> = new_lines
+        .iter()
+        .filter_map(|line| {
+            parse_env_key(line).map(|key| (key.to_string(), line.as_str()))
+        })
+        .collect();
+
+    let mut result_lines: Vec<String> = Vec::new();
+    let mut written_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Read existing file and merge
+    if path.exists() {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))?;
+
+        for line in content.lines() {
+            if let Some(key) = parse_env_key(line) {
+                if let Some(&new_line) = new_keys.get(key) {
+                    // Overwrite with new value
+                    result_lines.push(new_line.to_string());
+                    written_keys.insert(key.to_string());
+                } else {
+                    // Keep existing line
+                    result_lines.push(line.to_string());
+                }
             } else {
-                f.seek(SeekFrom::End(-1))?;
-                let mut buf = [0u8; 1];
-                f.read_exact(&mut buf)?;
-                buf[0] != b'\n'
+                // Comment or empty line - keep as is
+                result_lines.push(line.to_string());
             }
-        };
-
-        if needs_newline {
-            writeln!(f)?;
         }
+    }
 
-        f
-    } else {
-        fs::File::create(path).with_context(|| format!("create {}", path.display()))?
-    };
+    // Append new keys that weren't already in the file
+    for line in new_lines {
+        if let Some(key) = parse_env_key(line) {
+            if !written_keys.contains(key) {
+                result_lines.push(line.clone());
+            }
+        }
+    }
 
-    for l in lines {
-        writeln!(f, "{l}")?;
+    // Write result
+    let mut f = fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
+    for line in &result_lines {
+        writeln!(f, "{line}")?;
     }
     Ok(())
 }
@@ -443,6 +478,29 @@ mod tests {
     }
 
     // ============================================
+    // Tests for parse_env_key()
+    // ============================================
+
+    #[test]
+    fn test_parse_env_key_basic() {
+        assert_eq!(parse_env_key("KEY=value"), Some("KEY"));
+        assert_eq!(parse_env_key("FOO_BAR=baz"), Some("FOO_BAR"));
+    }
+
+    #[test]
+    fn test_parse_env_key_with_quotes() {
+        assert_eq!(parse_env_key(r#"KEY="value""#), Some("KEY"));
+    }
+
+    #[test]
+    fn test_parse_env_key_comments_and_empty() {
+        assert_eq!(parse_env_key("# comment"), None);
+        assert_eq!(parse_env_key(""), None);
+        assert_eq!(parse_env_key("   "), None);
+        assert_eq!(parse_env_key("  # indented comment"), None);
+    }
+
+    // ============================================
     // Tests for write_env_file()
     // ============================================
 
@@ -490,20 +548,85 @@ mod tests {
     }
 
     #[test]
-    fn test_write_env_file_appends_existing() {
+    fn test_write_env_file_appends_new_keys() {
         let tmp_dir = TempDir::new().unwrap();
         let file_path = tmp_dir.path().join(".env");
 
-        // Write initial content without trailing newline
-        fs::write(&file_path, "OLD_CONTENT").unwrap();
+        // Write initial content
+        fs::write(&file_path, "OLD_KEY=old_value\n").unwrap();
 
-        // Append with new content, ensuring newline is added automatically
+        // Append with new content
         let lines = vec![r#"NEW_KEY="new_value""#.to_string()];
         write_env_file(&file_path, &lines).unwrap();
 
         let content = fs::read_to_string(&file_path).unwrap();
-        assert!(content.starts_with("OLD_CONTENT"));
-        assert!(content.contains("\nNEW_KEY=\"new_value\""));
+        assert!(content.contains("OLD_KEY=old_value"));
+        assert!(content.contains(r#"NEW_KEY="new_value""#));
+    }
+
+    #[test]
+    fn test_write_env_file_overwrites_duplicates() {
+        let tmp_dir = TempDir::new().unwrap();
+        let file_path = tmp_dir.path().join(".env");
+
+        // Write initial content with a key we'll overwrite
+        fs::write(&file_path, "API_KEY=old_secret\nOTHER_KEY=keep_me\n").unwrap();
+
+        // Overwrite API_KEY
+        let lines = vec![r#"API_KEY="new_secret""#.to_string()];
+        write_env_file(&file_path, &lines).unwrap();
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        // Should have new value, not old
+        assert!(content.contains(r#"API_KEY="new_secret""#));
+        assert!(!content.contains("API_KEY=old_secret"));
+        // Other key should be preserved
+        assert!(content.contains("OTHER_KEY=keep_me"));
+    }
+
+    #[test]
+    fn test_write_env_file_preserves_comments() {
+        let tmp_dir = TempDir::new().unwrap();
+        let file_path = tmp_dir.path().join(".env");
+
+        // Write initial content with comments
+        fs::write(&file_path, "# This is a comment\nKEY1=value1\n\n# Another comment\n").unwrap();
+
+        // Add new key
+        let lines = vec![r#"KEY2="value2""#.to_string()];
+        write_env_file(&file_path, &lines).unwrap();
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("# This is a comment"));
+        assert!(content.contains("# Another comment"));
+        assert!(content.contains("KEY1=value1"));
+        assert!(content.contains(r#"KEY2="value2""#));
+    }
+
+    #[test]
+    fn test_write_env_file_mixed_overwrite_and_append() {
+        let tmp_dir = TempDir::new().unwrap();
+        let file_path = tmp_dir.path().join(".env");
+
+        // Initial content
+        fs::write(&file_path, "KEY1=original1\nKEY2=original2\n").unwrap();
+
+        // Overwrite KEY1 and add KEY3
+        let lines = vec![
+            r#"KEY1="updated1""#.to_string(),
+            r#"KEY3="new3""#.to_string(),
+        ];
+        write_env_file(&file_path, &lines).unwrap();
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        let content_lines: Vec<&str> = content.lines().collect();
+
+        // KEY1 should be updated (in its original position)
+        assert!(content_lines[0].contains(r#"KEY1="updated1""#));
+        // KEY2 should be preserved
+        assert!(content_lines[1].contains("KEY2=original2"));
+        // KEY3 should be appended
+        assert!(content_lines[2].contains(r#"KEY3="new3""#));
     }
 
     // ============================================
