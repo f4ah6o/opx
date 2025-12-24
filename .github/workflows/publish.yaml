@@ -7,8 +7,11 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
+
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
 
 jobs:
   publish:
@@ -20,12 +23,32 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-edit
+        run: cargo install cargo-edit
+
+      - name: Update Cargo package version from tag
+        run: |
+          VERSION=${RELEASE_TAG#v}
+          echo "Setting crate version to ${VERSION} from tag ${RELEASE_TAG}"
+          cargo set-version --allow-dirty "${VERSION}"
+
+      - name: Commit and push version update
+        run: |
+          VERSION=${RELEASE_TAG#v}
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: set version ${VERSION} from tag" || echo "No changes to commit"
+          git push
 
       - name: Publish to crates.io
         uses: crates-io/action@v1
