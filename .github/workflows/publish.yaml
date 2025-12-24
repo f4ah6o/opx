@@ -42,4 +42,4 @@ jobs:
           git push
 
       - name: Publish to crates.io
-        run: cargo publish
+        run: cargo publish --allow-dirty
