@@ -1,30 +1,33 @@
-name: Publish crate
+name: Publish to crates.io
 
 on:
-  release:
-    types: [created]
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   publish:
+    name: Publish opz crate
     runs-on: ubuntu-latest
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/opz
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Rust
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Set crate version from release tag
-        run: |
-          TAG="${{ github.event.release.tag_name }}"
-          VERSION="${TAG#v}"
-          cargo install cargo-edit --locked
-          cargo set-version "$VERSION"
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
       - name: Publish to crates.io
-        run: |
-          # Allow publishing after the version bump performed in this workflow.
-          cargo publish --locked --allow-dirty
+        uses: crates-io/action@v1
+        with:
+          publish-command: cargo publish --locked
