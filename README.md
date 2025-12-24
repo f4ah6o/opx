@@ -46,14 +46,14 @@ Options:
 
 Examples:
 ```bash
-# Run claude with secrets from "z.ai" item
-opz z.ai -- claude "hello"
+# Run claude with secrets from "example-item" item
+opz example-item -- claude "hello"
 
 # Keep the env file for debugging
-opz --keep z.ai -- env
+opz --keep example-item -- env
 
 # Specify vault and keep env file
-opz --vault Private --keep z.ai -- your-command
+opz --vault Private --keep example-item -- your-command
 ```
 
 ## How It Works
@@ -74,11 +74,11 @@ sequenceDiagram
     participant opz
     participant op as op CLI
 
-    Note over opz: User runs: opz z.ai -- claude "hello"
+    Note over opz: User runs: opz example-item -- claude "hello"
 
     opz->>op: op item list --format json
     op-->>opz: [{id, title, vault}, ...]
-    Note over opz: Match "z.ai" → get item ID
+    Note over opz: Match "example-item" → get item ID
 
     opz->>op: op item get <id> --format json
     op-->>opz: {fields: [{label, value}, ...]}

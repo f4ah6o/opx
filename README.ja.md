@@ -1,6 +1,6 @@
 # opz
 
-1Password CLI ラッパー - コマンドへのシームレスなsecret注入のためのツール
+1Password CLI ラッパー - コマンドへのシームレスな secret 注入のためのツール
 
 ## 機能
 
@@ -12,7 +12,7 @@
 ## インストール
 
 ```bash
-cargo install --path .
+cargo install opz
 ```
 
 ## 使い方
@@ -27,8 +27,8 @@ opz find <query>
 
 例:
 ```bash
-opz find z.ai
-# 出力: vjzgubnmgber7mczrkhrq6lkei	Employee	z.ai
+opz find baz
+# 出力: foo   bar     baz
 ```
 
 ### Secret 付きでコマンド実行
@@ -46,14 +46,14 @@ opz [OPTIONS] <ITEM> -- <COMMAND>...
 
 例:
 ```bash
-# "z.ai" アイテムの secret で claude を実行
-opz z.ai -- claude "hello"
+# "example-item" アイテムの secret で claude を実行
+opz example-item -- claude "hello"
 
 # デバッグ用に env ファイルを残す
-opz --keep z.ai -- env
+opz --keep example-item -- env
 
 # Vault を指定して env ファイルを残す
-opz --vault Private --keep z.ai -- your-command
+opz --vault Private --keep example-item -- your-command
 ```
 
 ## 仕組み
@@ -64,6 +64,36 @@ opz --vault Private --keep z.ai -- your-command
 4. 一時的な `.env` ファイルを作成
 5. `op run --env-file=...` 経由でコマンドを実行
 6. env ファイルを削除（`--keep` 指定時を除く）
+
+## `op` コマンドの利用
+
+セキュリティの透明性のため、`opz` が `op` CLI をどのように利用するかを示します:
+
+```mermaid
+sequenceDiagram
+    participant opz
+    participant op as op CLI
+
+    Note over opz: ユーザー実行: opz example-item -- claude "hello"
+
+    opz->>op: op item list --format json
+    op-->>opz: [{id, title, vault}, ...]
+    Note over opz: "example-item" にマッチ → アイテム ID を取得
+
+    opz->>op: op item get <id> --format json
+    op-->>opz: {fields: [{label, value}, ...]}
+    Note over opz: env 変数に変換<br/>(API_KEY="...", TOKEN="...")
+
+    opz->>opz: .1password env ファイルを書き込み
+
+    opz->>op: op run --env-file=.1password -- claude "hello"
+    Note over op: secret を注入して実行
+    op-->>opz: 終了ステータス
+
+    opz->>opz: .1password を削除（`--keep` を除く）
+```
+
+**セキュリティ**: `opz` は secret へのアクセスと認証をすべて `op` CLI に委任します。アイテムリストはメタデータのみを 60 秒間キャッシュします。
 
 ## 要件
 
