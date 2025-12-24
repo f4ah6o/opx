@@ -60,9 +60,9 @@ opz --vault Private --keep example-item -- your-command
 
 1. Fetches item list from 1Password (cached for 60 seconds)
 2. Finds the matching item by title (exact or fuzzy match)
-3. Extracts fields and converts them to environment variables
-4. Creates a temporary `.env` file
-5. Runs the command via `op run --env-file=...`
+3. Builds `op://<vault>/<item>/<field>` references for each field
+4. Writes a temporary `.env` file with those references
+5. Runs the command via `op run --env-file=...` (secrets resolved by `op`)
 6. Cleans up the env file (unless `--keep` is specified)
 
 ## `op` Command Usage
@@ -82,7 +82,7 @@ sequenceDiagram
 
     opz->>op: op item get <id> --format json
     op-->>opz: {fields: [{label, value}, ...]}
-    Note over opz: Convert to env vars<br/>(API_KEY="...", TOKEN="...")
+    Note over opz: Convert to env refs<br/>(API_KEY="op://vault/item/API_KEY", ...)
 
     opz->>opz: Write .env env file
 

@@ -60,9 +60,9 @@ opz --vault Private --keep example-item -- your-command
 
 1. 1Password からアイテムリストを取得（60秒間キャッシュ）
 2. タイトルで一致するアイテムを検索（完全一致またはファジーマッチ）
-3. フィールドを抽出して環境変数に変換
-4. 一時的な `.env` ファイルを作成
-5. `op run --env-file=...` 経由でコマンドを実行
+3. 各フィールドを `op://<vault>/<item>/<field>` 参照に変換
+4. 参照を書いた一時 `.env` ファイルを作成
+5. `op run --env-file=...` 経由でコマンドを実行（秘密は `op` が解決）
 6. env ファイルを削除（`--keep` 指定時を除く）
 
 ## `op` コマンドの利用
@@ -82,7 +82,7 @@ sequenceDiagram
 
     opz->>op: op item get <id> --format json
     op-->>opz: {fields: [{label, value}, ...]}
-    Note over opz: env 変数に変換<br/>(API_KEY="...", TOKEN="...")
+    Note over opz: env 参照に変換<br/>(API_KEY="op://vault/item/API_KEY", ...)
 
     opz->>opz: .env env ファイルを書き込み
 
