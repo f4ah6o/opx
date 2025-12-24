@@ -38,7 +38,7 @@ jobs:
         run: |
           VERSION=${RELEASE_TAG#v}
           echo "Setting crate version to ${VERSION} from tag ${RELEASE_TAG}"
-          cargo set-version --allow-dirty "${VERSION}"
+          cargo set-version "${VERSION}"
 
       - name: Commit and push version update
         run: |
