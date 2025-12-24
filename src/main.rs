@@ -76,6 +76,7 @@ struct ItemField {
     #[serde(default)]
     label: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     value: Option<serde_json::Value>,
 }
 
