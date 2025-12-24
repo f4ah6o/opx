@@ -12,7 +12,7 @@
 ## Installation
 
 ```bash
-cargo install --path .
+cargo install opz
 ```
 
 ## Usage
