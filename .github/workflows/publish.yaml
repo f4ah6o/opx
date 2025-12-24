@@ -1,10 +1,9 @@
 name: Publish to crates.io
 
 on:
+  release:
+    types: [created]
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: write
@@ -15,11 +14,7 @@ env:
 
 jobs:
   publish:
-    name: Publish opz crate
     runs-on: ubuntu-latest
-    environment:
-      name: crates-io
-      url: https://crates.io/crates/opz
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,8 +24,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Set crate version from release tag
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          cargo install cargo-edit --locked
+          cargo set-version "$VERSION"
 
       - name: Install cargo-edit
         run: cargo install cargo-edit
@@ -51,6 +50,5 @@ jobs:
           git push
 
       - name: Publish to crates.io
-        uses: crates-io/action@v1
-        with:
-          publish-command: cargo publish --locked
+        run: |
+          cargo publish --allow-dirty
