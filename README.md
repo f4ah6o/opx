@@ -27,8 +27,8 @@ opz find <query>
 
 Example:
 ```bash
-opz find z.ai
-# Output: vjzgubnmgber7mczrkhrq6lkei	Employee	z.ai
+opz find baz
+# Output: foo	bar	baz
 ```
 
 ### Run Commands with Secrets
