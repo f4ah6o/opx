@@ -1,4 +1,4 @@
-# opx
+# opz
 
 1Password CLI wrapper for seamless secret injection into commands.
 
@@ -22,12 +22,12 @@ cargo install --path .
 Search for 1Password items by keyword:
 
 ```bash
-opx find <query>
+opz find <query>
 ```
 
 Example:
 ```bash
-opx find z.ai
+opz find z.ai
 # Output: vjzgubnmgber7mczrkhrq6lkei	Employee	z.ai
 ```
 
@@ -36,7 +36,7 @@ opx find z.ai
 Run a command with secrets from a 1Password item as environment variables:
 
 ```bash
-opx [OPTIONS] <ITEM> -- <COMMAND>...
+opz [OPTIONS] <ITEM> -- <COMMAND>...
 ```
 
 Options:
@@ -47,13 +47,13 @@ Options:
 Examples:
 ```bash
 # Run claude with secrets from "z.ai" item
-opx z.ai -- claude "hello"
+opz z.ai -- claude "hello"
 
 # Keep the env file for debugging
-opx --keep z.ai -- env
+opz --keep z.ai -- env
 
 # Specify vault and keep env file
-opx --vault Private --keep z.ai -- your-command
+opz --vault Private --keep z.ai -- your-command
 ```
 
 ## How It Works

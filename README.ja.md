@@ -1,4 +1,4 @@
-# opx
+# opz
 
 1Password CLI ラッパー - コマンドへのシームレスなsecret注入のためのツール
 
@@ -22,12 +22,12 @@ cargo install --path .
 キーワードで 1Password アイテムを検索:
 
 ```bash
-opx find <query>
+opz find <query>
 ```
 
 例:
 ```bash
-opx find z.ai
+opz find z.ai
 # 出力: vjzgubnmgber7mczrkhrq6lkei	Employee	z.ai
 ```
 
@@ -36,7 +36,7 @@ opx find z.ai
 1Password アイテムの secret を環境変数としてコマンドを実行:
 
 ```bash
-opx [OPTIONS] <ITEM> -- <COMMAND>...
+opz [OPTIONS] <ITEM> -- <COMMAND>...
 ```
 
 オプション:
@@ -47,13 +47,13 @@ opx [OPTIONS] <ITEM> -- <COMMAND>...
 例:
 ```bash
 # "z.ai" アイテムの secret で claude を実行
-opx z.ai -- claude "hello"
+opz z.ai -- claude "hello"
 
 # デバッグ用に env ファイルを残す
-opx --keep z.ai -- env
+opz --keep z.ai -- env
 
 # Vault を指定して env ファイルを残す
-opx --vault Private --keep z.ai -- your-command
+opz --vault Private --keep z.ai -- your-command
 ```
 
 ## 仕組み

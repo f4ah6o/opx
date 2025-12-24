@@ -88,9 +88,9 @@ fn main() -> Result<()> {
         None => {
             // Default: run mode
             let item_title = cli.item_title.as_ref()
-                .ok_or_else(|| anyhow!("Item title required. Usage: opx [OPTIONS] <ITEM> -- <COMMAND>..."))?;
+                .ok_or_else(|| anyhow!("Item title required. Usage: opz [OPTIONS] <ITEM> -- <COMMAND>..."))?;
             if cli.command.is_empty() {
-                return Err(anyhow!("Command required after '--'. Usage: opx [OPTIONS] <ITEM> -- <COMMAND>..."));
+                return Err(anyhow!("Command required after '--'. Usage: opz [OPTIONS] <ITEM> -- <COMMAND>..."));
             }
             run_with_item(&cli, item_title, &cli.command)
         }
@@ -123,7 +123,7 @@ fn run_with_item(cli: &Cli, item_title: &str, command: &[String]) -> Result<()> 
             let vault = it.vault.as_ref().map(|v| v.name.as_str()).unwrap_or("-");
             eprintln!("  {}  [{}]  {}", it.id, vault, it.title);
         }
-        return Err(anyhow!("Please be more specific or use `opx find <query>` and pass exact title."));
+        return Err(anyhow!("Please be more specific or use `opz find <query>` and pass exact title."));
     }
 
     let item_id = &matches[0].id;
@@ -249,7 +249,7 @@ fn item_list_cached(vault: Option<&str>) -> Result<Vec<ItemListEntry>> {
 }
 
 fn cache_file_path(vault: Option<&str>) -> Result<PathBuf> {
-    let proj = ProjectDirs::from("dev", "opx", "opx").ok_or_else(|| anyhow!("no cache dir"))?;
+    let proj = ProjectDirs::from("dev", "opz", "opz").ok_or_else(|| anyhow!("no cache dir"))?;
     let base = proj.cache_dir().to_path_buf();
     let key = vault.unwrap_or("_all_");
     let mut hasher = Sha256::new();
