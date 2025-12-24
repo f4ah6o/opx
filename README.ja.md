@@ -15,6 +15,12 @@
 cargo install opz
 ```
 
+## Trusted publishing
+
+このリポジトリは [crates.io trusted publishing](https://crates.io/docs/trusted-publishing) に対応しています。
+`v2025.12.0` のようなタグを作成してプッシュすると、`Publish to crates.io` ワークフローがトリガーされ、OIDC経由で短期間有効なトークンを取得し、`cargo publish --locked` を実行します。
+ワークフローがトークンをリクエストできるようにするには、crates.io UI で `opz` クレートに対して trusted publishing を有効にする必要があります（リンクされたリポジトリ: `f4ah6o/opx`）。
+
 ## 使い方
 
 ### アイテム検索
