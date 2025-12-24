@@ -65,73 +65,18 @@ opz --vault Private --keep z.ai -- your-command
 5. Runs the command via `op run --env-file=...`
 6. Cleans up the env file (unless `--keep` is specified)
 
-## Security & Data Flow
+## `op` Command Usage
 
-For transparency, here's how `opz` interacts with the 1Password CLI (`op`):
+For security transparency, here are the exact `op` commands used:
 
 ```mermaid
-sequenceDiagram
-    actor User
-    participant opz
-    participant Cache
-    participant op as 1Password CLI (op)
-    participant 1P as 1Password
-    participant FS as Filesystem
-    participant Cmd as User Command
-
-    User->>opz: opz z.ai -- claude "hello"
-
-    Note over opz,Cache: Item List Retrieval (cached 60s)
-    opz->>Cache: Check cache for item list
-    alt Cache valid (< 60s)
-        Cache-->>opz: Return cached items
-    else Cache expired or missing
-        opz->>op: op item list --format json
-        op->>1P: Authenticate & fetch items
-        1P-->>op: Return item list
-        op-->>opz: JSON item list
-        opz->>Cache: Store items (60s TTL)
-    end
-
-    Note over opz: Item Matching (exact or fuzzy)
-    opz->>opz: Find "z.ai" in item list
-
-    Note over opz,1P: Fetch Item Details
-    opz->>op: op item get <item-id> --format json
-    op->>1P: Fetch item details
-    1P-->>op: Return item fields & secrets
-    op-->>opz: JSON with fields
-
-    Note over opz,FS: Env File Creation
-    opz->>opz: Convert fields to env vars
-    opz->>FS: Write .1password (temp env file)
-
-    Note over opz,Cmd: Secure Command Execution
-    opz->>op: op run --env-file=.1password -- claude "hello"
-    op->>FS: Read .1password
-    op->>1P: Resolve secret references (if any)
-    1P-->>op: Return secret values
-    op->>Cmd: Execute with injected env vars
-    Cmd-->>op: Command output
-    op-->>opz: Exit status
-
-    Note over opz,FS: Cleanup
-    alt --keep not specified
-        opz->>FS: Delete .1password
-    else --keep specified
-        Note over FS: .1password kept for debugging
-    end
-
-    opz-->>User: Return exit status
+flowchart LR
+    A[opz] -->|1| B["op item list<br/>--format json"]
+    A -->|2| C["op item get &lt;id&gt;<br/>--format json"]
+    A -->|3| D["op run<br/>--env-file=.1password<br/>-- &lt;command&gt;"]
 ```
 
-### Security Notes
-
-* **No Direct Secret Access**: `opz` never directly accesses secrets - all secret resolution is delegated to `op` CLI
-* **Temporary Files**: Environment files are cleaned up by default (use `--keep` only for debugging)
-* **Authentication**: All 1Password authentication is handled by `op` CLI
-* **Cache Security**: Item list cache (60s TTL) contains only metadata (IDs, titles, vault names), not secrets
-* **Secret Injection**: Secrets are injected into the command environment by `op run`, not by `opz`
+**Security**: `opz` never accesses secrets directly - all authentication and secret handling is delegated to `op` CLI.
 
 ## Requirements
 
