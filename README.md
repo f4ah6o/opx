@@ -6,6 +6,7 @@
 
 * Find items by keyword search
 * Run commands with secrets from 1Password items as environment variables
+* Generate env files with `gen` subcommand (appends to existing, overwrites duplicates)
 * Item list caching for faster repeated runs
 * Fuzzy matching when exact title match is not found
 
@@ -42,24 +43,48 @@ opz find baz
 Run a command with secrets from a 1Password item as environment variables:
 
 ```bash
-opz [OPTIONS] <ITEM> -- <COMMAND>...
+opz [OPTIONS] <ITEM> [ENV] -- <COMMAND>...
 ```
 
 Options:
 * `--vault <NAME>` - Vault name (optional, searches all vaults if omitted)
-* `--env-file <PATH>` (alias: `--out`) - Output env file path (default: `.env`)
-* `--keep` - Keep the generated env file
+
+Arguments:
+* `<ITEM>` - Item title to fetch secrets from
+* `[ENV]` - Output env file path (default: `.env`)
+
+The env file is preserved after command execution. If the file already exists, new entries are appended and duplicate keys are overwritten.
 
 Examples:
 ```bash
 # Run claude with secrets from "example-item" item
 opz example-item -- claude "hello"
 
-# Keep the env file for debugging
-opz --keep example-item -- env
+# Specify custom env file path
+opz example-item .env.local -- your-command
 
-# Specify vault and keep env file
-opz --vault Private --keep example-item -- your-command
+# Specify vault
+opz --vault Private example-item -- your-command
+```
+
+### Generate Env File
+
+Generate env file only without running a command:
+
+```bash
+opz gen <ITEM> [ENV]
+```
+
+Examples:
+```bash
+# Generate .env file
+opz gen example-item
+
+# Generate to custom path
+opz gen example-item .env.production
+
+# Specify vault
+opz --vault Private gen example-item
 ```
 
 ## How It Works
@@ -67,9 +92,10 @@ opz --vault Private --keep example-item -- your-command
 1. Fetches item list from 1Password (cached for 60 seconds)
 2. Finds the matching item by title (exact or fuzzy match)
 3. Builds `op://<vault>/<item>/<field>` references for each field
-4. Writes a temporary `.env` file with those references
+4. Writes `.env` file with references (appends to existing, overwrites duplicate keys)
 5. Runs the command via `op run --env-file=...` (secrets resolved by `op`)
-6. Cleans up the env file (unless `--keep` is specified)
+
+With `gen` subcommand, only steps 1-4 are executed (no command run).
 
 ## `op` Command Usage
 
@@ -90,13 +116,11 @@ sequenceDiagram
     op-->>opz: {fields: [{label, value}, ...]}
     Note over opz: Convert to env refs<br/>(API_KEY="op://vault/item/API_KEY", ...)
 
-    opz->>opz: Write .env env file
+    opz->>opz: Write .env (merge with existing)
 
     opz->>op: op run --env-file=.env -- claude "hello"
     Note over op: Inject secrets & execute
     op-->>opz: Exit status
-
-    opz->>opz: Delete .env (unless --keep)
 ```
 
 **Security**: `opz` delegates all secret access and authentication to `op` CLI. Item list is cached (60s) with metadata only.
