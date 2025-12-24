@@ -67,16 +67,33 @@ opz --vault Private --keep z.ai -- your-command
 
 ## `op` Command Usage
 
-For security transparency, here are the exact `op` commands used:
+For security transparency, here's how `opz` uses the `op` CLI:
 
 ```mermaid
-flowchart LR
-    A[opz] -->|1| B["op item list<br/>--format json"]
-    A -->|2| C["op item get &lt;id&gt;<br/>--format json"]
-    A -->|3| D["op run<br/>--env-file=.1password<br/>-- &lt;command&gt;"]
+sequenceDiagram
+    participant opz
+    participant op as op CLI
+
+    Note over opz: User runs: opz z.ai -- claude "hello"
+
+    opz->>op: op item list --format json
+    op-->>opz: [{id, title, vault}, ...]
+    Note over opz: Match "z.ai" → get item ID
+
+    opz->>op: op item get <id> --format json
+    op-->>opz: {fields: [{label, value}, ...]}
+    Note over opz: Convert to env vars<br/>(API_KEY="...", TOKEN="...")
+
+    opz->>opz: Write .1password env file
+
+    opz->>op: op run --env-file=.1password -- claude "hello"
+    Note over op: Inject secrets & execute
+    op-->>opz: Exit status
+
+    opz->>opz: Delete .1password (unless --keep)
 ```
 
-**Security**: `opz` never accesses secrets directly - all authentication and secret handling is delegated to `op` CLI.
+**Security**: `opz` delegates all secret access and authentication to `op` CLI. Item list is cached (60s) with metadata only.
 
 ## Requirements
 
