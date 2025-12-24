@@ -41,7 +41,7 @@ opz [OPTIONS] <ITEM> -- <COMMAND>...
 
 オプション:
 * `--vault <NAME>` - Vault 名（省略時はすべての Vault を検索）
-* `--out <PATH>` - 出力 env ファイルパス（デフォルト: `.1password`）
+* `--env-file <PATH>`（別名: `--out`） - 出力 env ファイルパス（デフォルト: `.env`）
 * `--keep` - 生成された env ファイルを残す
 
 例:
@@ -84,13 +84,13 @@ sequenceDiagram
     op-->>opz: {fields: [{label, value}, ...]}
     Note over opz: env 変数に変換<br/>(API_KEY="...", TOKEN="...")
 
-    opz->>opz: .1password env ファイルを書き込み
+    opz->>opz: .env env ファイルを書き込み
 
-    opz->>op: op run --env-file=.1password -- claude "hello"
+    opz->>op: op run --env-file=.env -- claude "hello"
     Note over op: secret を注入して実行
     op-->>opz: 終了ステータス
 
-    opz->>opz: .1password を削除（`--keep` を除く）
+    opz->>opz: .env を削除（`--keep` を除く）
 ```
 
 **セキュリティ**: `opz` は secret へのアクセスと認証をすべて `op` CLI に委任します。アイテムリストはメタデータのみを 60 秒間キャッシュします。

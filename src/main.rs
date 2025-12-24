@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, SystemTime},
@@ -20,9 +20,14 @@ struct Cli {
     #[arg(long, global = true)]
     vault: Option<String>,
 
-    /// Output env file path (default: .1password in current dir)
-    #[arg(long, global = true, default_value = ".1password")]
-    out: PathBuf,
+    /// Output env file path (default: .env in current dir)
+    #[arg(
+        long = "env-file",
+        alias = "out",
+        global = true,
+        default_value = ".env"
+    )]
+    env_file: PathBuf,
 
     /// Keep the generated env file
     #[arg(long, global = true)]
@@ -79,7 +84,10 @@ fn main() -> Result<()> {
         Some(Cmd::Find { query }) => {
             let items = item_list_cached(cli.vault.as_deref())?;
             let q = query.to_lowercase();
-            for it in items.into_iter().filter(|x| x.title.to_lowercase().contains(&q)) {
+            for it in items
+                .into_iter()
+                .filter(|x| x.title.to_lowercase().contains(&q))
+            {
                 let vault = it.vault.as_ref().map(|v| v.name.as_str()).unwrap_or("-");
                 println!("{}\t{}\t{}", it.id, vault, it.title);
             }
@@ -87,10 +95,13 @@ fn main() -> Result<()> {
         }
         None => {
             // Default: run mode
-            let item_title = cli.item_title.as_ref()
-                .ok_or_else(|| anyhow!("Item title required. Usage: opz [OPTIONS] <ITEM> -- <COMMAND>..."))?;
+            let item_title = cli.item_title.as_ref().ok_or_else(|| {
+                anyhow!("Item title required. Usage: opz [OPTIONS] <ITEM> -- <COMMAND>...")
+            })?;
             if cli.command.is_empty() {
-                return Err(anyhow!("Command required after '--'. Usage: opz [OPTIONS] <ITEM> -- <COMMAND>..."));
+                return Err(anyhow!(
+                    "Command required after '--'. Usage: opz [OPTIONS] <ITEM> -- <COMMAND>..."
+                ));
             }
             run_with_item(&cli, item_title, &cli.command)
         }
@@ -123,17 +134,28 @@ fn run_with_item(cli: &Cli, item_title: &str, command: &[String]) -> Result<()> 
             let vault = it.vault.as_ref().map(|v| v.name.as_str()).unwrap_or("-");
             eprintln!("  {}  [{}]  {}", it.id, vault, it.title);
         }
-        return Err(anyhow!("Please be more specific or use `opz find <query>` and pass exact title."));
+        return Err(anyhow!(
+            "Please be more specific or use `opz find <query>` and pass exact title."
+        ));
     }
 
     let item_id = &matches[0].id;
     let item = item_get(item_id)?;
     let env_lines = item_to_env_lines(&item)?;
 
-    write_env_file(&cli.out, &env_lines)?;
+    let existing_env_content = if cli.env_file.exists() {
+        Some(
+            fs::read(&cli.env_file)
+                .with_context(|| format!("failed to read {}", cli.env_file.display()))?,
+        )
+    } else {
+        None
+    };
+
+    write_env_file(&cli.env_file, &env_lines)?;
     let status = Command::new("op")
         .arg("run")
-        .arg(format!("--env-file={}", cli.out.display()))
+        .arg(format!("--env-file={}", cli.env_file.display()))
         .arg("--")
         .args(command)
         .stdin(Stdio::inherit())
@@ -143,7 +165,14 @@ fn run_with_item(cli: &Cli, item_title: &str, command: &[String]) -> Result<()> 
         .context("failed to run `op run`")?;
 
     if !cli.keep {
-        let _ = fs::remove_file(&cli.out);
+        match existing_env_content {
+            Some(original) => {
+                let _ = fs::write(&cli.env_file, original);
+            }
+            None => {
+                let _ = fs::remove_file(&cli.env_file);
+            }
+        }
     }
 
     if !status.success() {
@@ -157,7 +186,9 @@ fn item_to_env_lines(item: &ItemGet) -> Result<Vec<String>> {
     let mut out = Vec::new();
 
     for f in &item.fields {
-        let Some(label) = f.label.as_ref() else { continue };
+        let Some(label) = f.label.as_ref() else {
+            continue;
+        };
         if !re.is_match(label) {
             // env var invalid -> skip
             continue;
@@ -179,7 +210,11 @@ fn item_to_env_lines(item: &ItemGet) -> Result<Vec<String>> {
         }
 
         // .env safe quoting
-        out.push(format!(r#"{k}="{v}""#, k = label, v = escape_env_value(&val)));
+        out.push(format!(
+            r#"{k}="{v}""#,
+            k = label,
+            v = escape_env_value(&val)
+        ));
     }
 
     Ok(out)
@@ -193,7 +228,35 @@ fn escape_env_value(s: &str) -> String {
 }
 
 fn write_env_file(path: &Path, lines: &[String]) -> Result<()> {
-    let mut f = fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
+    let mut f = if path.exists() {
+        let mut f = fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("open {}", path.display()))?;
+
+        // Ensure we start appending on a new line
+        let needs_newline = {
+            let meta = f.metadata()?;
+            if meta.len() == 0 {
+                false
+            } else {
+                f.seek(SeekFrom::End(-1))?;
+                let mut buf = [0u8; 1];
+                f.read_exact(&mut buf)?;
+                buf[0] != b'\n'
+            }
+        };
+
+        if needs_newline {
+            writeln!(f)?;
+        }
+
+        f
+    } else {
+        fs::File::create(path).with_context(|| format!("create {}", path.display()))?
+    };
+
     for l in lines {
         writeln!(f, "{l}")?;
     }
@@ -214,8 +277,8 @@ fn op_json(args: &[&str]) -> Result<serde_json::Value> {
         ));
     }
 
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .context("failed to parse op JSON output")?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("failed to parse op JSON output")?;
     Ok(v)
 }
 
@@ -343,8 +406,8 @@ mod tests {
             fields: vec![
                 make_field(Some("VALID_KEY"), Some(serde_json::json!("value"))),
                 make_field(Some("invalid-key"), Some(serde_json::json!("value"))), // dash not allowed
-                make_field(Some("123_START"), Some(serde_json::json!("value"))),   // can't start with number
-                make_field(Some("has space"), Some(serde_json::json!("value"))),   // space not allowed
+                make_field(Some("123_START"), Some(serde_json::json!("value"))), // can't start with number
+                make_field(Some("has space"), Some(serde_json::json!("value"))), // space not allowed
             ],
         };
         let lines = item_to_env_lines(&item).unwrap();
@@ -503,20 +566,20 @@ mod tests {
     }
 
     #[test]
-    fn test_write_env_file_overwrites_existing() {
+    fn test_write_env_file_appends_existing() {
         let tmp_dir = TempDir::new().unwrap();
         let file_path = tmp_dir.path().join(".env");
 
-        // Write initial content
+        // Write initial content without trailing newline
         fs::write(&file_path, "OLD_CONTENT").unwrap();
 
-        // Overwrite with new content
+        // Append with new content, ensuring newline is added automatically
         let lines = vec![r#"NEW_KEY="new_value""#.to_string()];
         write_env_file(&file_path, &lines).unwrap();
 
         let content = fs::read_to_string(&file_path).unwrap();
-        assert!(!content.contains("OLD_CONTENT"));
-        assert!(content.contains(r#"NEW_KEY="new_value""#));
+        assert!(content.starts_with("OLD_CONTENT"));
+        assert!(content.contains("\nNEW_KEY=\"new_value\""));
     }
 
     // ============================================
@@ -569,7 +632,8 @@ mod tests {
 
     #[test]
     fn test_item_list_entry_deserialization() {
-        let json = r#"{"id": "abc123", "title": "My Item", "vault": {"id": "v1", "name": "Personal"}}"#;
+        let json =
+            r#"{"id": "abc123", "title": "My Item", "vault": {"id": "v1", "name": "Personal"}}"#;
         let item: ItemListEntry = serde_json::from_str(json).unwrap();
         assert_eq!(item.id, "abc123");
         assert_eq!(item.title, "My Item");
@@ -623,4 +687,3 @@ mod tests {
         assert!(field.value.is_none());
     }
 }
-
