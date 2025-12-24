@@ -75,9 +75,6 @@ struct ItemGet {
 struct ItemField {
     #[serde(default)]
     label: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    value: Option<serde_json::Value>,
 }
 
 fn main() -> Result<()> {
@@ -376,15 +373,17 @@ mod tests {
     // Tests for item_to_env_lines()
     // ============================================
 
-    fn make_field(label: Option<&str>, value: Option<serde_json::Value>) -> ItemField {
+    fn make_field(label: Option<&str>) -> ItemField {
         ItemField {
             label: label.map(String::from),
-            value,
         }
     }
 
     fn make_item(fields: Vec<ItemField>) -> ItemGet {
-        ItemGet { fields, vault: None }
+        ItemGet {
+            fields,
+            vault: None,
+        }
     }
 
     fn env_lines(item: &ItemGet) -> Vec<String> {
@@ -394,8 +393,8 @@ mod tests {
     #[test]
     fn test_item_to_env_lines_basic() {
         let item = make_item(vec![
-            make_field(Some("API_KEY"), Some(serde_json::json!("secret123"))),
-            make_field(Some("DB_HOST"), Some(serde_json::json!("localhost"))),
+            make_field(Some("API_KEY")),
+            make_field(Some("DB_HOST")),
         ]);
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 2);
@@ -406,10 +405,10 @@ mod tests {
     #[test]
     fn test_item_to_env_lines_skips_invalid_labels() {
         let item = make_item(vec![
-            make_field(Some("VALID_KEY"), Some(serde_json::json!("value"))),
-            make_field(Some("invalid-key"), Some(serde_json::json!("value"))), // dash not allowed
-            make_field(Some("123_START"), Some(serde_json::json!("value"))), // can't start with number
-            make_field(Some("has space"), Some(serde_json::json!("value"))), // space not allowed
+            make_field(Some("VALID_KEY")),
+            make_field(Some("invalid-key")), // dash not allowed
+            make_field(Some("123_START")),   // can't start with number
+            make_field(Some("has space")),   // space not allowed
         ]);
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 1);
@@ -419,84 +418,21 @@ mod tests {
     #[test]
     fn test_item_to_env_lines_valid_label_patterns() {
         let item = make_item(vec![
-            make_field(Some("_UNDERSCORE_START"), Some(serde_json::json!("v1"))),
-            make_field(Some("lowercase"), Some(serde_json::json!("v2"))),
-            make_field(Some("MixedCase123"), Some(serde_json::json!("v3"))),
-            make_field(Some("WITH_123_NUMBERS"), Some(serde_json::json!("v4"))),
+            make_field(Some("_UNDERSCORE_START")),
+            make_field(Some("lowercase")),
+            make_field(Some("MixedCase123")),
+            make_field(Some("WITH_123_NUMBERS")),
         ]);
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 4);
     }
 
     #[test]
-    fn test_item_to_env_lines_skips_empty_values() {
-        let item = make_item(vec![
-            make_field(Some("HAS_VALUE"), Some(serde_json::json!("content"))),
-            make_field(Some("EMPTY_STRING"), Some(serde_json::json!(""))),
-            make_field(Some("NO_VALUE"), None),
-        ]);
-        let lines = env_lines(&item);
-        assert_eq!(lines.len(), 3); // labels remain even without values
-        assert!(lines.contains(&r#"HAS_VALUE="op://Vault/Item/HAS_VALUE""#.to_string()));
-        assert!(lines.contains(&r#"EMPTY_STRING="op://Vault/Item/EMPTY_STRING""#.to_string()));
-        assert!(lines.contains(&r#"NO_VALUE="op://Vault/Item/NO_VALUE""#.to_string()));
-    }
-
-    #[test]
     fn test_item_to_env_lines_skips_no_label() {
-        let item = make_item(vec![
-            make_field(None, Some(serde_json::json!("orphan_value"))),
-            make_field(Some("VALID"), Some(serde_json::json!("ok"))),
-        ]);
+        let item = make_item(vec![make_field(None), make_field(Some("VALID"))]);
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0], r#"VALID="op://Vault/Item/VALID""#);
-    }
-
-    #[test]
-    fn test_item_to_env_lines_handles_number_values() {
-        let item = make_item(vec![
-            make_field(Some("PORT"), Some(serde_json::json!(8080))),
-            make_field(Some("RATIO"), Some(serde_json::json!(3.14))),
-        ]);
-        let lines = env_lines(&item);
-        assert_eq!(lines.len(), 2);
-        assert!(lines.contains(&r#"PORT="op://Vault/Item/PORT""#.to_string()));
-        assert!(lines.contains(&r#"RATIO="op://Vault/Item/RATIO""#.to_string()));
-    }
-
-    #[test]
-    fn test_item_to_env_lines_handles_boolean_values() {
-        let item = make_item(vec![
-            make_field(Some("ENABLED"), Some(serde_json::json!(true))),
-            make_field(Some("DISABLED"), Some(serde_json::json!(false))),
-        ]);
-        let lines = env_lines(&item);
-        assert_eq!(lines.len(), 2);
-        assert!(lines.contains(&r#"ENABLED="op://Vault/Item/ENABLED""#.to_string()));
-        assert!(lines.contains(&r#"DISABLED="op://Vault/Item/DISABLED""#.to_string()));
-    }
-
-    #[test]
-    fn test_item_to_env_lines_handles_object_values() {
-        let item = make_item(vec![make_field(
-            Some("CONFIG"),
-            Some(serde_json::json!({"key": "value"})),
-        )]);
-        let lines = env_lines(&item);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0], r#"CONFIG="op://Vault/Item/CONFIG""#);
-    }
-
-    #[test]
-    fn test_item_to_env_lines_escapes_special_chars() {
-        let item = make_item(vec![make_field(
-            Some("COMPLEX"),
-            Some(serde_json::json!("line1\nline2\"quoted\"")),
-        )]);
-        let lines = env_lines(&item);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0], r#"COMPLEX="op://Vault/Item/COMPLEX""#);
     }
 
     #[test]
@@ -660,11 +596,10 @@ mod tests {
 
     #[test]
     fn test_item_field_with_null_value() {
-        // With #[serde(default)], JSON null is deserialized as None
+        // Unknown fields (like "value") are ignored during deserialization
         let json = r#"{"label": "empty_field", "value": null}"#;
         let field: ItemField = serde_json::from_str(json).unwrap();
         assert_eq!(field.label, Some("empty_field".to_string()));
-        assert!(field.value.is_none()); // null becomes None due to #[serde(default)]
     }
 
     #[test]
@@ -672,6 +607,5 @@ mod tests {
         let json = r#"{"label": "no_value_field"}"#;
         let field: ItemField = serde_json::from_str(json).unwrap();
         assert_eq!(field.label, Some("no_value_field".to_string()));
-        assert!(field.value.is_none());
     }
 }
