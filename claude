@@ -1,0 +1,4 @@
+notesPlain="op://Employee/z.ai/notesPlain"
+ANTHROPIC_AUTH_TOKEN="op://Employee/z.ai/ANTHROPIC_AUTH_TOKEN"
+ANTHROPIC_BASE_URL="op://Employee/z.ai/ANTHROPIC_BASE_URL"
+API_TIMEOUT_MS="op://Employee/z.ai/API_TIMEOUT_MS"
