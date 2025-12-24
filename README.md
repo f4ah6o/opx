@@ -15,6 +15,12 @@
 cargo install opz
 ```
 
+## Trusted publishing
+
+This repository is configured for [crates.io trusted publishing](https://crates.io/docs/trusted-publishing).
+Create a tag such as `v2025.12.0` and push it to trigger the `Publish to crates.io` workflow, which mints a short-lived token via OIDC and runs `cargo publish --locked`.
+You must enable trusted publishing for the `opz` crate in the crates.io UI (linked repository: `f4ah6o/opx`) before the workflow is allowed to request tokens.
+
 ## Usage
 
 ### Find Items
