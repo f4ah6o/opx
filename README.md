@@ -41,7 +41,7 @@ opz [OPTIONS] <ITEM> -- <COMMAND>...
 
 Options:
 * `--vault <NAME>` - Vault name (optional, searches all vaults if omitted)
-* `--out <PATH>` - Output env file path (default: `.1password`)
+* `--env-file <PATH>` (alias: `--out`) - Output env file path (default: `.env`)
 * `--keep` - Keep the generated env file
 
 Examples:
@@ -84,13 +84,13 @@ sequenceDiagram
     op-->>opz: {fields: [{label, value}, ...]}
     Note over opz: Convert to env vars<br/>(API_KEY="...", TOKEN="...")
 
-    opz->>opz: Write .1password env file
+    opz->>opz: Write .env env file
 
-    opz->>op: op run --env-file=.1password -- claude "hello"
+    opz->>op: op run --env-file=.env -- claude "hello"
     Note over op: Inject secrets & execute
     op-->>opz: Exit status
 
-    opz->>opz: Delete .1password (unless --keep)
+    opz->>opz: Delete .env (unless --keep)
 ```
 
 **Security**: `opz` delegates all secret access and authentication to `op` CLI. Item list is cached (60s) with metadata only.
