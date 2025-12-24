@@ -20,6 +20,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install cargo-edit
+        run: cargo install cargo-edit
+
+      - name: Update Cargo.toml version
+        run: cargo set-version ${{ github.event.release.tag_name }}
+
       - name: Authenticate with crates.io
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
