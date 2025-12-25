@@ -34,8 +34,8 @@ opz find <query>
 
 Example:
 ```bash
-opz find baz
-# Output: foo	bar	baz
+opz find <query>
+# Output: item-1	item-2	item-3
 ```
 
 ### Run Commands with Secrets
