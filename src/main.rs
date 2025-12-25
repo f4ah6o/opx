@@ -51,6 +51,21 @@ enum Cmd {
         #[arg(value_name = "ENV")]
         env_file: Option<PathBuf>,
     },
+
+    /// Run command with secrets from 1Password item
+    Run {
+        /// Item title
+        #[arg(value_name = "ITEM")]
+        item: String,
+
+        /// Output env file path (default: .env)
+        #[arg(value_name = "ENV")]
+        env_file: Option<PathBuf>,
+
+        /// Command to run (after --)
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -77,6 +92,8 @@ struct ItemGet {
 struct ItemField {
     #[serde(default)]
     label: Option<String>,
+    #[serde(default)]
+    value: Option<serde_json::Value>,
 }
 
 fn main() -> Result<()> {
@@ -100,6 +117,21 @@ fn main() -> Result<()> {
                 .clone()
                 .unwrap_or_else(|| PathBuf::from(".env"));
             generate_env_file(&cli, item, &env_path)
+        }
+        Some(Cmd::Run {
+            item,
+            env_file,
+            command,
+        }) => {
+            let env_path = env_file
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(".env"));
+            if command.is_empty() {
+                return Err(anyhow!(
+                    "Command required after '--'. Usage: opz run <ITEM> [ENV] -- <COMMAND>..."
+                ));
+            }
+            run_with_item(&cli, item, &env_path, command)
         }
         None => {
             let item_title = cli.item_title.as_ref().ok_or_else(|| {
@@ -165,31 +197,39 @@ fn find_item(vault: Option<&str>, item_title: &str) -> Result<(String, String, S
 }
 
 fn generate_env_file(cli: &Cli, item_title: &str, env_file: &Path) -> Result<()> {
-    let (item_id, vault_name, matched_title) = find_item(cli.vault.as_deref(), item_title)?;
+    let (item_id, vault_name, _) = find_item(cli.vault.as_deref(), item_title)?;
     let item = item_get(&item_id)?;
-    let env_lines = item_to_env_lines(&item, &vault_name, &matched_title)?;
+    let env_lines = item_to_env_lines(&item, &vault_name, &item_id)?;
     write_env_file(env_file, &env_lines)?;
     eprintln!("Generated: {}", env_file.display());
     Ok(())
 }
 
 fn run_with_item(cli: &Cli, item_title: &str, env_file: &Path, command: &[String]) -> Result<()> {
-    let (item_id, vault_name, matched_title) = find_item(cli.vault.as_deref(), item_title)?;
+    let (item_id, vault_name, _) = find_item(cli.vault.as_deref(), item_title)?;
     let item = item_get(&item_id)?;
-    let env_lines = item_to_env_lines(&item, &vault_name, &matched_title)?;
+    let env_lines = item_to_env_lines(&item, &vault_name, &item_id)?;
 
     write_env_file(env_file, &env_lines)?;
 
-    let status = Command::new("op")
-        .arg("run")
-        .arg(format!("--env-file={}", env_file.display()))
-        .arg("--")
-        .args(command)
+    // Build command with inline environment variables
+    let mut cmd = Command::new(&command[0]);
+    cmd.args(&command[1..]);
+
+    // Resolve each op:// reference and set as environment variable
+    for line in &env_lines {
+        if let Some((key, reference)) = parse_env_line_kv(line) {
+            let value = op_read(&reference)?;
+            cmd.env(key, value);
+        }
+    }
+
+    let status = cmd
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .context("failed to run `op run`")?;
+        .context("failed to run command")?;
 
     if !status.success() {
         return Err(anyhow!("command failed with status: {}", status));
@@ -197,7 +237,7 @@ fn run_with_item(cli: &Cli, item_title: &str, env_file: &Path, command: &[String
     Ok(())
 }
 
-fn item_to_env_lines(item: &ItemGet, vault_name: &str, item_title: &str) -> Result<Vec<String>> {
+fn item_to_env_lines(item: &ItemGet, vault_name: &str, item_id: &str) -> Result<Vec<String>> {
     let re = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$")?;
     let mut out = Vec::new();
 
@@ -209,25 +249,16 @@ fn item_to_env_lines(item: &ItemGet, vault_name: &str, item_title: &str) -> Resu
             // env var invalid -> skip
             continue;
         }
+        // Skip fields without value
+        if f.value.is_none() {
+            continue;
+        }
 
-        let reference = format!("op://{}/{}/{}", vault_name, item_title, label);
-
-        // .env safe quoting
-        out.push(format!(
-            r#"{k}="{v}""#,
-            k = label,
-            v = escape_env_value(&reference)
-        ));
+        let reference = format!("op://{}/{}/{}", vault_name, item_id, label);
+        out.push(format!("{k}={v}", k = label, v = reference));
     }
 
     Ok(out)
-}
-
-fn escape_env_value(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
 }
 
 /// Parse env line to extract key name (e.g., "KEY=value" -> "KEY")
@@ -237,6 +268,36 @@ fn parse_env_key(line: &str) -> Option<&str> {
         return None;
     }
     trimmed.split('=').next()
+}
+
+/// Parse env line to extract key and value (e.g., "KEY=value" -> ("KEY", "value"))
+fn parse_env_line_kv(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let mut parts = trimmed.splitn(2, '=');
+    let key = parts.next()?;
+    let value = parts.next()?;
+    Some((key, value))
+}
+
+/// Read a secret from 1Password using op read
+fn op_read(reference: &str) -> Result<String> {
+    let out = Command::new("op")
+        .arg("read")
+        .arg(reference)
+        .output()
+        .context("failed to run `op read`")?;
+
+    if !out.status.success() {
+        return Err(anyhow!(
+            "op read failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+
+    Ok(String::from_utf8(out.stdout)?.trim().to_string())
 }
 
 fn write_env_file(path: &Path, new_lines: &[String]) -> Result<()> {
@@ -363,54 +424,17 @@ mod tests {
     use tempfile::TempDir;
 
     // ============================================
-    // Tests for escape_env_value()
-    // ============================================
-
-    #[test]
-    fn test_escape_env_value_plain_text() {
-        assert_eq!(escape_env_value("hello"), "hello");
-        assert_eq!(escape_env_value("simple text"), "simple text");
-    }
-
-    #[test]
-    fn test_escape_env_value_with_backslash() {
-        assert_eq!(escape_env_value(r"path\to\file"), r"path\\to\\file");
-        assert_eq!(escape_env_value(r"\\server\share"), r"\\\\server\\share");
-    }
-
-    #[test]
-    fn test_escape_env_value_with_quotes() {
-        assert_eq!(escape_env_value(r#"say "hello""#), r#"say \"hello\""#);
-        assert_eq!(escape_env_value(r#""""#), r#"\"\""#); // two quotes -> two escaped quotes
-    }
-
-    #[test]
-    fn test_escape_env_value_with_newlines() {
-        assert_eq!(escape_env_value("line1\nline2"), r"line1\nline2");
-        assert_eq!(escape_env_value("line1\r\nline2"), r"line1\r\nline2");
-    }
-
-    #[test]
-    fn test_escape_env_value_combined() {
-        // Test multiple escape characters together
-        assert_eq!(
-            escape_env_value("path\\to\n\"file\""),
-            r#"path\\to\n\"file\""#
-        );
-    }
-
-    #[test]
-    fn test_escape_env_value_empty() {
-        assert_eq!(escape_env_value(""), "");
-    }
-
-    // ============================================
     // Tests for item_to_env_lines()
     // ============================================
 
-    fn make_field(label: Option<&str>) -> ItemField {
+    fn make_field(label: Option<&str>, has_value: bool) -> ItemField {
         ItemField {
             label: label.map(String::from),
+            value: if has_value {
+                Some(serde_json::Value::String("test".to_string()))
+            } else {
+                None
+            },
         }
     }
 
@@ -422,41 +446,41 @@ mod tests {
     }
 
     fn env_lines(item: &ItemGet) -> Vec<String> {
-        item_to_env_lines(item, "Vault", "Item").unwrap()
+        item_to_env_lines(item, "Vault", "abc123").unwrap()
     }
 
     #[test]
     fn test_item_to_env_lines_basic() {
         let item = make_item(vec![
-            make_field(Some("API_KEY")),
-            make_field(Some("DB_HOST")),
+            make_field(Some("API_KEY"), true),
+            make_field(Some("DB_HOST"), true),
         ]);
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 2);
-        assert!(lines.contains(&r#"API_KEY="op://Vault/Item/API_KEY""#.to_string()));
-        assert!(lines.contains(&r#"DB_HOST="op://Vault/Item/DB_HOST""#.to_string()));
+        assert!(lines.contains(&"API_KEY=op://Vault/abc123/API_KEY".to_string()));
+        assert!(lines.contains(&"DB_HOST=op://Vault/abc123/DB_HOST".to_string()));
     }
 
     #[test]
     fn test_item_to_env_lines_skips_invalid_labels() {
         let item = make_item(vec![
-            make_field(Some("VALID_KEY")),
-            make_field(Some("invalid-key")), // dash not allowed
-            make_field(Some("123_START")),   // can't start with number
-            make_field(Some("has space")),   // space not allowed
+            make_field(Some("VALID_KEY"), true),
+            make_field(Some("invalid-key"), true), // dash not allowed
+            make_field(Some("123_START"), true),   // can't start with number
+            make_field(Some("has space"), true),   // space not allowed
         ]);
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0], r#"VALID_KEY="op://Vault/Item/VALID_KEY""#);
+        assert_eq!(lines[0], "VALID_KEY=op://Vault/abc123/VALID_KEY");
     }
 
     #[test]
     fn test_item_to_env_lines_valid_label_patterns() {
         let item = make_item(vec![
-            make_field(Some("_UNDERSCORE_START")),
-            make_field(Some("lowercase")),
-            make_field(Some("MixedCase123")),
-            make_field(Some("WITH_123_NUMBERS")),
+            make_field(Some("_UNDERSCORE_START"), true),
+            make_field(Some("lowercase"), true),
+            make_field(Some("MixedCase123"), true),
+            make_field(Some("WITH_123_NUMBERS"), true),
         ]);
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 4);
@@ -464,10 +488,13 @@ mod tests {
 
     #[test]
     fn test_item_to_env_lines_skips_no_label() {
-        let item = make_item(vec![make_field(None), make_field(Some("VALID"))]);
+        let item = make_item(vec![
+            make_field(None, true),
+            make_field(Some("VALID"), true),
+        ]);
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0], r#"VALID="op://Vault/Item/VALID""#);
+        assert_eq!(lines[0], "VALID=op://Vault/abc123/VALID");
     }
 
     #[test]
@@ -475,6 +502,17 @@ mod tests {
         let item = make_item(vec![]);
         let lines = env_lines(&item);
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_item_to_env_lines_skips_no_value() {
+        let item = make_item(vec![
+            make_field(Some("NO_VALUE"), false),
+            make_field(Some("HAS_VALUE"), true),
+        ]);
+        let lines = env_lines(&item);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "HAS_VALUE=op://Vault/abc123/HAS_VALUE");
     }
 
     // ============================================
