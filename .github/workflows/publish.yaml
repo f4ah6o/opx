@@ -2,7 +2,7 @@ name: Publish to crates.io
 
 on:
   release:
-    types: [created]
+    types: [published]
 
 permissions:
   id-token: write
@@ -20,11 +20,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-edit
-        run: cargo install cargo-edit
-
       - name: Update Cargo.toml version
-        run: cargo set-version ${{ github.event.release.tag_name }}
+        run: |
+          # タグ名(v1.2.3など)から'v'を取り除いてバージョンを取得
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          # Cargo.tomlの最初のversion行を置換
+          sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$VERSION\"/}" Cargo.toml
 
       - name: Authenticate with crates.io
         id: auth
