@@ -205,6 +205,24 @@ fn generate_env_file(cli: &Cli, item_title: &str, env_file: &Path) -> Result<()>
     Ok(())
 }
 
+/// Escape a string for use in a double-quoted shell context.
+/// Allows $VAR expansion while escaping other special characters.
+fn shell_escape_for_expansion(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 2);
+    result.push('"');
+    for c in s.chars() {
+        match c {
+            '"' | '\\' | '`' => {
+                result.push('\\');
+                result.push(c);
+            }
+            _ => result.push(c),
+        }
+    }
+    result.push('"');
+    result
+}
+
 fn run_with_item(cli: &Cli, item_title: &str, env_file: &Path, command: &[String]) -> Result<()> {
     let (item_id, vault_name, _) = find_item(cli.vault.as_deref(), item_title)?;
     let item = item_get(&item_id)?;
@@ -212,9 +230,17 @@ fn run_with_item(cli: &Cli, item_title: &str, env_file: &Path, command: &[String
 
     write_env_file(env_file, &env_lines)?;
 
-    // Build command with inline environment variables
-    let mut cmd = Command::new(&command[0]);
-    cmd.args(&command[1..]);
+    // Build shell command string with proper escaping
+    // This allows $VAR expansion in command arguments
+    let shell_cmd = command
+        .iter()
+        .map(|arg| shell_escape_for_expansion(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c");
+    cmd.arg(&shell_cmd);
 
     // Resolve each op:// reference and set as environment variable
     for line in &env_lines {
@@ -768,5 +794,39 @@ mod tests {
         let json = r#"{"label": "no_value_field"}"#;
         let field: ItemField = serde_json::from_str(json).unwrap();
         assert_eq!(field.label, Some("no_value_field".to_string()));
+    }
+
+    #[test]
+    fn test_shell_escape_for_expansion_basic() {
+        // Simple string
+        assert_eq!(shell_escape_for_expansion("hello"), r#""hello""#);
+        // Variable should be preserved for shell expansion
+        assert_eq!(shell_escape_for_expansion("$VAR"), r#""$VAR""#);
+        assert_eq!(shell_escape_for_expansion("$API_TOKEN"), r#""$API_TOKEN""#);
+    }
+
+    #[test]
+    fn test_shell_escape_for_expansion_special_chars() {
+        // Double quotes should be escaped
+        assert_eq!(shell_escape_for_expansion(r#"say "hello""#), r#""say \"hello\"""#);
+        // Backslash should be escaped
+        assert_eq!(shell_escape_for_expansion(r#"path\to\file"#), r#""path\\to\\file""#);
+        // Backticks should be escaped
+        assert_eq!(shell_escape_for_expansion("`cmd`"), r#""\`cmd\`""#);
+    }
+
+    #[test]
+    fn test_shell_escape_for_expansion_with_spaces() {
+        // Spaces are preserved in double quotes
+        assert_eq!(shell_escape_for_expansion("hello world"), r#""hello world""#);
+        assert_eq!(shell_escape_for_expansion("arg with $VAR"), r#""arg with $VAR""#);
+    }
+
+    #[test]
+    fn test_shell_escape_for_expansion_curl_example() {
+        // Real-world curl header example
+        let input = "Authorization: Bearer $API_TOKEN";
+        let expected = r#""Authorization: Bearer $API_TOKEN""#;
+        assert_eq!(shell_escape_for_expansion(input), expected);
     }
 }
