@@ -28,7 +28,7 @@ struct Cli {
     #[arg(value_name = "ITEM")]
     item_title: Option<String>,
 
-    /// Output env file path (default: .env)
+    /// Output env file path (optional, no file generated if omitted)
     #[arg(value_name = "ENV")]
     env_file: Option<PathBuf>,
 
@@ -48,7 +48,7 @@ enum Cmd {
         #[arg(value_name = "ITEM")]
         item: String,
 
-        /// Output env file path (default: .env)
+        /// Output env file path (optional, no file generated if omitted)
         #[arg(value_name = "ENV")]
         env_file: Option<PathBuf>,
     },
@@ -59,7 +59,7 @@ enum Cmd {
         #[arg(value_name = "ITEM")]
         item: String,
 
-        /// Output env file path (default: .env)
+        /// Output env file path (optional, no file generated if omitted)
         #[arg(value_name = "ENV")]
         env_file: Option<PathBuf>,
 
@@ -114,41 +114,31 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Cmd::Gen { item, env_file }) => {
-            let env_path = env_file
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(".env"));
-            generate_env_file(&cli, item, &env_path)
+            generate_env_output(&cli, item, env_file.as_deref())
         }
         Some(Cmd::Run {
             item,
             env_file,
             command,
         }) => {
-            let env_path = env_file
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(".env"));
             if command.is_empty() {
                 return Err(anyhow!(
                     "Command required after '--'. Usage: opz run <ITEM> [ENV] -- <COMMAND>..."
                 ));
             }
-            run_with_item(&cli, item, &env_path, command)
+            run_with_item(&cli, item, env_file.as_deref(), command)
         }
         None => {
             let item_title = cli.item_title.as_ref().ok_or_else(|| {
                 anyhow!("Item title required. Usage: opz [OPTIONS] <ITEM> [ENV] -- <COMMAND>...")
             })?;
-            let env_file = cli
-                .env_file
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(".env"));
 
             if cli.command.is_empty() {
                 return Err(anyhow!(
                     "Command required after '--'. Usage: opz [OPTIONS] <ITEM> [ENV] -- <COMMAND>..."
                 ));
             }
-            run_with_item(&cli, item_title, &env_file, &cli.command)
+            run_with_item(&cli, item_title, cli.env_file.as_deref(), &cli.command)
         }
     }
 }
@@ -197,12 +187,20 @@ fn find_item(vault: Option<&str>, item_title: &str) -> Result<(String, String, S
     Ok((item_id, vault_name, matches[0].title.clone()))
 }
 
-fn generate_env_file(cli: &Cli, item_title: &str, env_file: &Path) -> Result<()> {
+fn generate_env_output(cli: &Cli, item_title: &str, env_file: Option<&Path>) -> Result<()> {
     let (item_id, vault_name, _) = find_item(cli.vault.as_deref(), item_title)?;
     let item = item_get(&item_id)?;
     let env_lines = item_to_env_lines(&item, &vault_name, &item_id)?;
-    write_env_file(env_file, &env_lines)?;
-    eprintln!("Generated: {}", env_file.display());
+
+    if let Some(path) = env_file {
+        write_env_file(path, &env_lines)?;
+        eprintln!("Generated: {}", path.display());
+    } else {
+        // 標準出力に出力
+        for line in env_lines {
+            println!("{}", line);
+        }
+    }
     Ok(())
 }
 
@@ -299,12 +297,15 @@ fn expand_vars(s: &str, env_vars: &HashMap<String, String>) -> String {
     result
 }
 
-fn run_with_item(cli: &Cli, item_title: &str, env_file: &Path, command: &[String]) -> Result<()> {
+fn run_with_item(cli: &Cli, item_title: &str, env_file: Option<&Path>, command: &[String]) -> Result<()> {
     let (item_id, vault_name, _) = find_item(cli.vault.as_deref(), item_title)?;
     let item = item_get(&item_id)?;
     let env_lines = item_to_env_lines(&item, &vault_name, &item_id)?;
 
-    write_env_file(env_file, &env_lines)?;
+    if let Some(path) = env_file {
+        write_env_file(path, &env_lines)?;
+        eprintln!("Generated: {}", path.display());
+    }
 
     // First pass: collect all environment variable values
     let mut env_vars: HashMap<String, String> = HashMap::new();

@@ -51,14 +51,17 @@ opz [OPTIONS] <ITEM> [ENV] -- <COMMAND>...
 
 引数:
 * `<ITEM>` - secret を取得するアイテムタイトル
-* `[ENV]` - 出力 env ファイルパス（デフォルト: `.env`）
+* `[ENV]` - 出力 env ファイルパス（省略時はファイル生成なし）
 
-env ファイルはコマンド実行後も保持されます。既存ファイルがある場合は追記され、重複キーは上書きされます。
+`[ENV]` を指定した場合、env ファイルはコマンド実行後も保持されます。既存ファイルがある場合は追記され、重複キーは上書きされます。
 
 例:
 ```bash
-# "example-item" アイテムの secret で claude を実行
-opz example-item -- claude "hello"
+# secret 付きでコマンド実行（.env ファイルは生成されない）
+opz example-item -- your-command
+
+# secret を注入して .env ファイルも生成
+opz example-item .env -- your-command
 
 # カスタム env ファイルパスを指定
 opz example-item .env.local -- your-command
@@ -77,8 +80,11 @@ opz gen <ITEM> [ENV]
 
 例:
 ```bash
-# .env ファイルを生成
+# 標準出力に出力
 opz gen example-item
+
+# .env ファイルを生成
+opz gen example-item .env
 
 # カスタムパスに生成
 opz gen example-item .env.production
@@ -91,9 +97,9 @@ opz --vault Private gen example-item
 
 1. 1Password からアイテムリストを取得（60秒間キャッシュ）
 2. タイトルで一致するアイテムを検索（完全一致またはファジーマッチ）
-3. 各フィールドを `op://<vault>/<item>/<field>` 参照に変換
-4. `.env` ファイルに参照を書き込み（既存ファイルにマージ、重複キーは上書き）
-5. `op run --env-file=...` 経由でコマンドを実行（秘密は `op` が解決）
+3. 各フィールドの secret 値を取得
+4. env ファイルパスが指定されている場合はファイルに書き込み（既存ファイルにマージ、重複キーは上書き）；指定がない場合は標準出力に出力
+5. 環境変数として secret を注入してコマンドを実行
 
 `gen` サブコマンドの場合、ステップ 1-4 のみ実行されます（コマンド実行なし）。
 
@@ -114,12 +120,12 @@ sequenceDiagram
 
     opz->>op: op item get <id> --format json
     op-->>opz: {fields: [{label, value}, ...]}
-    Note over opz: env 参照に変換<br/>(API_KEY="op://vault/item/API_KEY", ...)
+    Note over opz: secret 値を解決<br/>（環境変数として注入）
 
-    opz->>opz: .env に書き込み（既存とマージ）
+    Note over opz: オプション: .env ファイルを指定時は書き込み
 
-    opz->>op: op run --env-file=.env -- claude "hello"
-    Note over op: secret を注入して実行
+    opz->>op: sh -c "claude \"hello\""
+    Note over opz: secret を含む環境変数で実行
     op-->>opz: 終了ステータス
 ```
 

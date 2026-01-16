@@ -51,14 +51,17 @@ Options:
 
 Arguments:
 * `<ITEM>` - Item title to fetch secrets from
-* `[ENV]` - Output env file path (default: `.env`)
+* `[ENV]` - Output env file path (optional, no file generated if omitted)
 
-The env file is preserved after command execution. If the file already exists, new entries are appended and duplicate keys are overwritten.
+When `[ENV]` is specified, the env file is preserved after command execution. If the file already exists, new entries are appended and duplicate keys are overwritten.
 
 Examples:
 ```bash
-# Run claude with secrets from "example-item" item
-opz example-item -- claude "hello"
+# Run command with secrets from "example-item" item (no .env file generated)
+opz example-item -- your-command
+
+# Run with secrets and generate .env file
+opz example-item .env -- your-command
 
 # Specify custom env file path
 opz example-item .env.local -- your-command
@@ -77,8 +80,11 @@ opz gen <ITEM> [ENV]
 
 Examples:
 ```bash
-# Generate .env file
+# Output env to stdout
 opz gen example-item
+
+# Generate .env file
+opz gen example-item .env
 
 # Generate to custom path
 opz gen example-item .env.production
@@ -92,8 +98,8 @@ opz --vault Private gen example-item
 1. Fetches item list from 1Password (cached for 60 seconds)
 2. Finds the matching item by title (exact or fuzzy match)
 3. Builds `op://<vault>/<item>/<field>` references for each field
-4. Writes `.env` file with references (appends to existing, overwrites duplicate keys)
-5. Runs the command via `op run --env-file=...` (secrets resolved by `op`)
+4. If env file is specified, writes the file with references (appends to existing, overwrites duplicate keys); otherwise outputs to stdout
+5. Runs the command with secrets injected as environment variables
 
 With `gen` subcommand, only steps 1-4 are executed (no command run).
 
@@ -114,12 +120,12 @@ sequenceDiagram
 
     opz->>op: op item get <id> --format json
     op-->>opz: {fields: [{label, value}, ...]}
-    Note over opz: Convert to env refs<br/>(API_KEY="op://vault/item/API_KEY", ...)
+    Note over opz: Resolve secret values<br/>(inject as env vars)
 
-    opz->>opz: Write .env (merge with existing)
+    Note over opz: Optional: write .env if specified
 
-    opz->>op: op run --env-file=.env -- claude "hello"
-    Note over op: Inject secrets & execute
+    opz->>op: sh -c "claude \"hello\""
+    Note over opz: Execute with secrets in environment
     op-->>opz: Exit status
 ```
 
