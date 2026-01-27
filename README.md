@@ -1,11 +1,11 @@
 # opz
 
-1Password CLI wrapper for seamless secret injection into commands.
+1Password/Bitwarden CLI wrapper for seamless secret injection into commands.
 
 ## Features
 
 * Find items by keyword search
-* Run commands with secrets from 1Password items as environment variables
+* Run commands with secrets from 1Password or Bitwarden items as environment variables
 * Generate env files with `gen` subcommand (appends to existing, overwrites duplicates)
 * Item list caching for faster repeated runs
 * Fuzzy matching when exact title match is not found
@@ -47,7 +47,8 @@ opz [OPTIONS] <ITEM> [ENV] -- <COMMAND>...
 ```
 
 Options:
-* `--vault <NAME>` - Vault name (optional, searches all vaults if omitted)
+* `--provider <op|bw>` - Secret provider (default: `op`)
+* `--vault <NAME>` - Vault name (optional, searches all vaults if omitted; `op` provider only)
 
 Arguments:
 * `<ITEM>` - Item title to fetch secrets from
@@ -68,6 +69,9 @@ opz example-item .env.local -- your-command
 
 # Specify vault
 opz --vault Private example-item -- your-command
+
+# Use Bitwarden CLI
+opz --provider bw example-item -- your-command
 ```
 
 ### Generate Env File
@@ -91,14 +95,17 @@ opz gen example-item .env.production
 
 # Specify vault
 opz --vault Private gen example-item
+
+# Use Bitwarden CLI
+opz --provider bw gen example-item
 ```
 
 ## How It Works
 
-1. Fetches item list from 1Password (cached for 60 seconds)
+1. Fetches item list from the selected provider (cached for 60 seconds)
 2. Finds the matching item by title (exact or fuzzy match)
-3. Builds `op://<vault>/<item>/<field>` references for each field
-4. If env file is specified, writes the file with references (appends to existing, overwrites duplicate keys); otherwise outputs to stdout
+3. Builds references or values for each field
+4. If env file is specified, writes the file (appends to existing, overwrites duplicate keys); otherwise outputs to stdout
 5. Runs the command with secrets injected as environment variables
 
 With `gen` subcommand, only steps 1-4 are executed (no command run).
@@ -131,6 +138,33 @@ sequenceDiagram
 
 **Security**: `opz` delegates all secret access and authentication to `op` CLI. Item list is cached (60s) with metadata only.
 
+## `bw` Command Usage
+
+For Bitwarden CLI:
+
+```mermaid
+sequenceDiagram
+    participant opz
+    participant bw as bw CLI
+
+    Note over opz: User runs: opz --provider bw example-item -- claude "hello"
+
+    opz->>bw: bw list items
+    bw-->>opz: [{id, name}, ...]
+    Note over opz: Match "example-item" → get item ID
+
+    opz->>bw: bw get item <id>
+    bw-->>opz: {fields: [{name, value}, ...], login: {username, password}}
+    Note over opz: Resolve secret values<br/>(inject as env vars)
+
+    Note over opz: Optional: write .env if specified
+
+    opz->>bw: sh -c "claude \"hello\""
+    Note over opz: Execute with secrets in environment
+    bw-->>opz: Exit status
+```
+
 ## Requirements
 
 * [1Password CLI](https://developer.1password.com/docs/cli/) (`op`) installed and authenticated
+* [Bitwarden CLI](https://bitwarden.com/ja-jp/help/cli/) (`bw`) installed and authenticated (when using `--provider bw`)
