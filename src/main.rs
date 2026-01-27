@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,10 @@ use std::{
 #[command(author, version, about)]
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
+    /// Secret provider (default: op)
+    #[arg(long, global = true, value_enum, default_value = "op")]
+    provider: Provider,
+
     /// Vault name (optional). If omitted, search all items and pick best match.
     #[arg(long, global = true)]
     vault: Option<String>,
@@ -53,7 +57,7 @@ enum Cmd {
         env_file: Option<PathBuf>,
     },
 
-    /// Run command with secrets from 1Password item
+    /// Run command with secrets from a provider item
     Run {
         /// Item title
         #[arg(value_name = "ITEM")]
@@ -67,6 +71,23 @@ enum Cmd {
         #[arg(last = true)]
         command: Vec<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum Provider {
+    /// 1Password CLI (`op`)
+    Op,
+    /// Bitwarden CLI (`bw`)
+    Bw,
+}
+
+impl Provider {
+    fn as_str(self) -> &'static str {
+        match self {
+            Provider::Op => "op",
+            Provider::Bw => "bw",
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -97,25 +118,59 @@ struct ItemField {
     value: Option<serde_json::Value>,
 }
 
+#[derive(Deserialize, Serialize, Debug)]
+struct SimpleItem {
+    id: String,
+    title: String,
+    vault_name: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct BwItemListEntry {
+    id: String,
+    name: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct BwItemGet {
+    #[serde(default)]
+    fields: Vec<BwField>,
+    #[serde(default)]
+    login: Option<BwLogin>,
+}
+
+#[derive(Deserialize, Debug)]
+struct BwField {
+    name: String,
+    #[serde(default)]
+    value: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct BwLogin {
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.cmd {
         Some(Cmd::Find { query }) => {
-            let items = item_list_cached(cli.vault.as_deref())?;
+            let items = item_list_cached(cli.provider, cli.vault.as_deref())?;
             let q = query.to_lowercase();
             for it in items
                 .into_iter()
                 .filter(|x| x.title.to_lowercase().contains(&q))
             {
-                let vault = it.vault.as_ref().map(|v| v.name.as_str()).unwrap_or("-");
+                let vault = it.vault_name.as_deref().unwrap_or("-");
                 println!("{}\t{}\t{}", it.id, vault, it.title);
             }
             Ok(())
         }
-        Some(Cmd::Gen { item, env_file }) => {
-            generate_env_output(&cli, item, env_file.as_deref())
-        }
+        Some(Cmd::Gen { item, env_file }) => generate_env_output(&cli, item, env_file.as_deref()),
         Some(Cmd::Run {
             item,
             env_file,
@@ -143,11 +198,11 @@ fn main() -> Result<()> {
     }
 }
 
-/// Find and match item by title, returns (item_id, vault_name, item_title)
-fn find_item(vault: Option<&str>, item_title: &str) -> Result<(String, String, String)> {
-    let items = item_list_cached(vault)?;
+/// Find and match item by title.
+fn find_item(provider: Provider, vault: Option<&str>, item_title: &str) -> Result<SimpleItem> {
+    let items = item_list_cached(provider, vault)?;
 
-    let mut matches: Vec<ItemListEntry> = items
+    let mut matches: Vec<SimpleItem> = items
         .into_iter()
         .filter(|x| x.title == item_title)
         .collect();
@@ -155,7 +210,7 @@ fn find_item(vault: Option<&str>, item_title: &str) -> Result<(String, String, S
     // If exact match not found, fallback to contains (simple fuzzy)
     if matches.is_empty() {
         let q = item_title.to_lowercase();
-        matches = item_list_cached(vault)?
+        matches = item_list_cached(provider, vault)?
             .into_iter()
             .filter(|x| x.title.to_lowercase().contains(&q))
             .collect();
@@ -167,7 +222,7 @@ fn find_item(vault: Option<&str>, item_title: &str) -> Result<(String, String, S
     if matches.len() > 1 {
         eprintln!("Ambiguous item title. Candidates:");
         for it in matches.iter().take(20) {
-            let vault = it.vault.as_ref().map(|v| v.name.as_str()).unwrap_or("-");
+            let vault = it.vault_name.as_deref().unwrap_or("-");
             eprintln!("  {}  [{}]  {}", it.id, vault, it.title);
         }
         return Err(anyhow!(
@@ -175,22 +230,34 @@ fn find_item(vault: Option<&str>, item_title: &str) -> Result<(String, String, S
         ));
     }
 
-    let item_id = matches[0].id.clone();
-    let item = item_get(&item_id)?;
-    let vault_name = matches
-        .first()
-        .and_then(|m| m.vault.as_ref())
-        .or_else(|| item.vault.as_ref())
-        .map(|v| v.name.clone())
-        .ok_or_else(|| anyhow!("Vault name is required. Try specifying --vault."))?;
-
-    Ok((item_id, vault_name, matches[0].title.clone()))
+    let mut item = matches.remove(0);
+    if provider == Provider::Op && item.vault_name.is_none() {
+        let op_item = op_item_get(&item.id)?;
+        item.vault_name = op_item.vault.as_ref().map(|v| v.name.clone());
+        if item.vault_name.is_none() {
+            return Err(anyhow!("Vault name is required. Try specifying --vault."));
+        }
+    }
+    Ok(item)
 }
 
 fn generate_env_output(cli: &Cli, item_title: &str, env_file: Option<&Path>) -> Result<()> {
-    let (item_id, vault_name, _) = find_item(cli.vault.as_deref(), item_title)?;
-    let item = item_get(&item_id)?;
-    let env_lines = item_to_env_lines(&item, &vault_name, &item_id)?;
+    let found = find_item(cli.provider, cli.vault.as_deref(), item_title)?;
+    let env_lines = match cli.provider {
+        Provider::Op => {
+            let vault_name = found
+                .vault_name
+                .as_deref()
+                .ok_or_else(|| anyhow!("Vault name is required. Try specifying --vault."))?;
+            let item = op_item_get(&found.id)?;
+            op_item_to_env_lines(&item, vault_name, &found.id)?
+        }
+        Provider::Bw => {
+            let item = bw_item_get(&found.id)?;
+            let values = bw_item_env_values(&item)?;
+            bw_env_lines(&values)
+        }
+    };
 
     if let Some(path) = env_file {
         write_env_file(path, &env_lines)?;
@@ -297,23 +364,36 @@ fn expand_vars(s: &str, env_vars: &HashMap<String, String>) -> String {
     result
 }
 
-fn run_with_item(cli: &Cli, item_title: &str, env_file: Option<&Path>, command: &[String]) -> Result<()> {
-    let (item_id, vault_name, _) = find_item(cli.vault.as_deref(), item_title)?;
-    let item = item_get(&item_id)?;
-    let env_lines = item_to_env_lines(&item, &vault_name, &item_id)?;
+fn run_with_item(
+    cli: &Cli,
+    item_title: &str,
+    env_file: Option<&Path>,
+    command: &[String],
+) -> Result<()> {
+    let found = find_item(cli.provider, cli.vault.as_deref(), item_title)?;
+    let (env_lines, env_vars) = match cli.provider {
+        Provider::Op => {
+            let vault_name = found
+                .vault_name
+                .as_deref()
+                .ok_or_else(|| anyhow!("Vault name is required. Try specifying --vault."))?;
+            let item = op_item_get(&found.id)?;
+            let env_lines = op_item_to_env_lines(&item, vault_name, &found.id)?;
+            let env_vars = op_env_vars_from_lines(&env_lines)?;
+            (env_lines, env_vars)
+        }
+        Provider::Bw => {
+            let item = bw_item_get(&found.id)?;
+            let values = bw_item_env_values(&item)?;
+            let env_lines = bw_env_lines(&values);
+            let env_vars = values.into_iter().collect();
+            (env_lines, env_vars)
+        }
+    };
 
     if let Some(path) = env_file {
         write_env_file(path, &env_lines)?;
         eprintln!("Generated: {}", path.display());
-    }
-
-    // First pass: collect all environment variable values
-    let mut env_vars: HashMap<String, String> = HashMap::new();
-    for line in &env_lines {
-        if let Some((key, reference)) = parse_env_line_kv(line) {
-            let value = op_read(&reference)?;
-            env_vars.insert(key.to_string(), value);
-        }
     }
 
     // Second pass: expand $VAR references in command arguments
@@ -351,7 +431,7 @@ fn run_with_item(cli: &Cli, item_title: &str, env_file: Option<&Path>, command: 
     Ok(())
 }
 
-fn item_to_env_lines(item: &ItemGet, vault_name: &str, item_id: &str) -> Result<Vec<String>> {
+fn op_item_to_env_lines(item: &ItemGet, vault_name: &str, item_id: &str) -> Result<Vec<String>> {
     let re = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$")?;
     let mut out = Vec::new();
 
@@ -373,6 +453,46 @@ fn item_to_env_lines(item: &ItemGet, vault_name: &str, item_id: &str) -> Result<
     }
 
     Ok(out)
+}
+
+fn bw_item_env_values(item: &BwItemGet) -> Result<Vec<(String, String)>> {
+    let re = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$")?;
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for field in &item.fields {
+        if !re.is_match(&field.name) {
+            continue;
+        }
+        let Some(value) = field.value.as_ref() else {
+            continue;
+        };
+        if seen.insert(field.name.clone()) {
+            out.push((field.name.clone(), value.clone()));
+        }
+    }
+
+    if let Some(login) = item.login.as_ref() {
+        if let Some(username) = login.username.as_ref() {
+            if re.is_match("USERNAME") && seen.insert("USERNAME".to_string()) {
+                out.push(("USERNAME".to_string(), username.clone()));
+            }
+        }
+        if let Some(password) = login.password.as_ref() {
+            if re.is_match("PASSWORD") && seen.insert("PASSWORD".to_string()) {
+                out.push(("PASSWORD".to_string(), password.clone()));
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn bw_env_lines(values: &[(String, String)]) -> Vec<String> {
+    values
+        .iter()
+        .map(|(key, value)| format!("{key}={}", shell_escape_literal(value)))
+        .collect()
 }
 
 /// Parse env line to extract key name (e.g., "KEY=value" -> "KEY")
@@ -414,15 +534,24 @@ fn op_read(reference: &str) -> Result<String> {
     Ok(String::from_utf8(out.stdout)?.trim().to_string())
 }
 
+fn op_env_vars_from_lines(env_lines: &[String]) -> Result<HashMap<String, String>> {
+    let mut env_vars: HashMap<String, String> = HashMap::new();
+    for line in env_lines {
+        if let Some((key, reference)) = parse_env_line_kv(line) {
+            let value = op_read(reference)?;
+            env_vars.insert(key.to_string(), value);
+        }
+    }
+    Ok(env_vars)
+}
+
 fn write_env_file(path: &Path, new_lines: &[String]) -> Result<()> {
     use std::collections::HashMap;
 
     // Build a map of new keys for quick lookup
     let new_keys: HashMap<String, &str> = new_lines
         .iter()
-        .filter_map(|line| {
-            parse_env_key(line).map(|key| (key.to_string(), line.as_str()))
-        })
+        .filter_map(|line| parse_env_key(line).map(|key| (key.to_string(), line.as_str())))
         .collect();
 
     let mut result_lines: Vec<String> = Vec::new();
@@ -430,8 +559,8 @@ fn write_env_file(path: &Path, new_lines: &[String]) -> Result<()> {
 
     // Read existing file and merge
     if path.exists() {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let content =
+            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
 
         for line in content.lines() {
             if let Some(key) = parse_env_key(line) {
@@ -486,48 +615,102 @@ fn op_json(args: &[&str]) -> Result<serde_json::Value> {
     Ok(v)
 }
 
-/// Cache `op item list --format json` to speed up repeated runs.
-fn item_list_cached(vault: Option<&str>) -> Result<Vec<ItemListEntry>> {
-    let cache_path = cache_file_path(vault)?;
+fn bw_json(args: &[&str]) -> Result<serde_json::Value> {
+    let out = Command::new("bw")
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run bw {}", args.join(" ")))?;
+
+    if !out.status.success() {
+        return Err(anyhow!(
+            "bw error ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("failed to parse bw JSON output")?;
+    Ok(v)
+}
+
+/// Cache item list to speed up repeated runs.
+fn item_list_cached(provider: Provider, vault: Option<&str>) -> Result<Vec<SimpleItem>> {
+    if provider == Provider::Bw && vault.is_some() {
+        return Err(anyhow!("--vault is only supported with the op provider."));
+    }
+
+    let cache_path = cache_file_path(provider, vault)?;
     let ttl = Duration::from_secs(60); // 60秒程度で十分（好みで調整）
 
     if let Ok(meta) = fs::metadata(&cache_path) {
         if let Ok(mtime) = meta.modified() {
             if SystemTime::now().duration_since(mtime).unwrap_or_default() < ttl {
                 let bytes = fs::read(&cache_path)?;
-                let items: Vec<ItemListEntry> = serde_json::from_slice(&bytes)?;
+                let items: Vec<SimpleItem> = serde_json::from_slice(&bytes)?;
                 return Ok(items);
             }
         }
     }
 
-    let mut args = vec!["item", "list", "--format", "json"];
-    if let Some(v) = vault {
-        // `op item list --vault <name>` が使える環境想定（未対応なら削る）
-        args.push("--vault");
-        args.push(v);
-    }
+    let items = match provider {
+        Provider::Op => {
+            let mut args = vec!["item", "list", "--format", "json"];
+            if let Some(v) = vault {
+                // `op item list --vault <name>` が使える環境想定（未対応なら削る）
+                args.push("--vault");
+                args.push(v);
+            }
 
-    let v = op_json(&args)?;
-    let items: Vec<ItemListEntry> = serde_json::from_value(v)?;
+            let v = op_json(&args)?;
+            let items: Vec<ItemListEntry> = serde_json::from_value(v)?;
+            items
+                .into_iter()
+                .map(|item| SimpleItem {
+                    id: item.id,
+                    title: item.title,
+                    vault_name: item.vault.map(|v| v.name),
+                })
+                .collect::<Vec<_>>()
+        }
+        Provider::Bw => {
+            let v = bw_json(&["list", "items"])?;
+            let items: Vec<BwItemListEntry> = serde_json::from_value(v)?;
+            items
+                .into_iter()
+                .map(|item| SimpleItem {
+                    id: item.id,
+                    title: item.name,
+                    vault_name: None,
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+
     fs::create_dir_all(cache_path.parent().unwrap())?;
     fs::write(&cache_path, serde_json::to_vec(&items)?)?;
     Ok(items)
 }
 
-fn cache_file_path(vault: Option<&str>) -> Result<PathBuf> {
+fn cache_file_path(provider: Provider, vault: Option<&str>) -> Result<PathBuf> {
     let proj = ProjectDirs::from("dev", "opz", "opz").ok_or_else(|| anyhow!("no cache dir"))?;
     let base = proj.cache_dir().to_path_buf();
-    let key = vault.unwrap_or("_all_");
+    let key = format!("{}:{}", provider.as_str(), vault.unwrap_or("_all_"));
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
     let name = format!("item_list_{}.json", hex::encode(hasher.finalize()));
     Ok(base.join(name))
 }
 
-fn item_get(item_id: &str) -> Result<ItemGet> {
+fn op_item_get(item_id: &str) -> Result<ItemGet> {
     let v = op_json(&["item", "get", item_id, "--format", "json"])?;
     let item: ItemGet = serde_json::from_value(v)?;
+    Ok(item)
+}
+
+fn bw_item_get(item_id: &str) -> Result<BwItemGet> {
+    let v = bw_json(&["get", "item", item_id])?;
+    let item: BwItemGet = serde_json::from_value(v)?;
     Ok(item)
 }
 
@@ -560,7 +743,7 @@ mod tests {
     }
 
     fn env_lines(item: &ItemGet) -> Vec<String> {
-        item_to_env_lines(item, "Vault", "abc123").unwrap()
+        op_item_to_env_lines(item, "Vault", "abc123").unwrap()
     }
 
     #[test]
@@ -627,6 +810,57 @@ mod tests {
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0], "HAS_VALUE=op://Vault/abc123/HAS_VALUE");
+    }
+
+    // ============================================
+    // Tests for bw_item_env_values() and bw_env_lines()
+    // ============================================
+
+    fn make_bw_item(fields: Vec<BwField>, login: Option<BwLogin>) -> BwItemGet {
+        BwItemGet { fields, login }
+    }
+
+    #[test]
+    fn test_bw_item_env_values_custom_fields() {
+        let item = make_bw_item(
+            vec![
+                BwField {
+                    name: "API_KEY".to_string(),
+                    value: Some("secret".to_string()),
+                },
+                BwField {
+                    name: "bad-key".to_string(),
+                    value: Some("skip".to_string()),
+                },
+            ],
+            None,
+        );
+        let values = bw_item_env_values(&item).unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].0, "API_KEY");
+        assert_eq!(values[0].1, "secret");
+    }
+
+    #[test]
+    fn test_bw_item_env_values_includes_login() {
+        let item = make_bw_item(
+            vec![],
+            Some(BwLogin {
+                username: Some("alice".to_string()),
+                password: Some("pw".to_string()),
+            }),
+        );
+        let values = bw_item_env_values(&item).unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0].0, "USERNAME");
+        assert_eq!(values[1].0, "PASSWORD");
+    }
+
+    #[test]
+    fn test_bw_env_lines_quotes_values() {
+        let values = vec![("TOKEN".to_string(), "a$b".to_string())];
+        let lines = bw_env_lines(&values);
+        assert_eq!(lines[0], r#"TOKEN="a\$b""#);
     }
 
     // ============================================
@@ -742,7 +976,11 @@ mod tests {
         let file_path = tmp_dir.path().join(".env");
 
         // Write initial content with comments
-        fs::write(&file_path, "# This is a comment\nKEY1=value1\n\n# Another comment\n").unwrap();
+        fs::write(
+            &file_path,
+            "# This is a comment\nKEY1=value1\n\n# Another comment\n",
+        )
+        .unwrap();
 
         // Add new key
         let lines = vec![r#"KEY2="value2""#.to_string()];
@@ -787,8 +1025,8 @@ mod tests {
 
     #[test]
     fn test_cache_file_path_with_vault() {
-        let path1 = cache_file_path(Some("my-vault")).unwrap();
-        let path2 = cache_file_path(Some("other-vault")).unwrap();
+        let path1 = cache_file_path(Provider::Op, Some("my-vault")).unwrap();
+        let path2 = cache_file_path(Provider::Op, Some("other-vault")).unwrap();
 
         // Different vaults should produce different paths
         assert_ne!(path1, path2);
@@ -804,7 +1042,7 @@ mod tests {
 
     #[test]
     fn test_cache_file_path_without_vault() {
-        let path = cache_file_path(None).unwrap();
+        let path = cache_file_path(Provider::Op, None).unwrap();
 
         // Should produce a valid path
         assert!(path.extension().unwrap() == "json");
@@ -816,12 +1054,12 @@ mod tests {
     #[test]
     fn test_cache_file_path_deterministic() {
         // Same input should produce same output
-        let path1 = cache_file_path(Some("test-vault")).unwrap();
-        let path2 = cache_file_path(Some("test-vault")).unwrap();
+        let path1 = cache_file_path(Provider::Op, Some("test-vault")).unwrap();
+        let path2 = cache_file_path(Provider::Op, Some("test-vault")).unwrap();
         assert_eq!(path1, path2);
 
-        let path3 = cache_file_path(None).unwrap();
-        let path4 = cache_file_path(None).unwrap();
+        let path3 = cache_file_path(Provider::Op, None).unwrap();
+        let path4 = cache_file_path(Provider::Op, None).unwrap();
         assert_eq!(path3, path4);
     }
 
@@ -896,9 +1134,15 @@ mod tests {
     #[test]
     fn test_shell_escape_for_expansion_special_chars() {
         // Double quotes should be escaped
-        assert_eq!(shell_escape_for_expansion(r#"say "hello""#), r#""say \"hello\"""#);
+        assert_eq!(
+            shell_escape_for_expansion(r#"say "hello""#),
+            r#""say \"hello\"""#
+        );
         // Backslash should be escaped
-        assert_eq!(shell_escape_for_expansion(r#"path\to\file"#), r#""path\\to\\file""#);
+        assert_eq!(
+            shell_escape_for_expansion(r#"path\to\file"#),
+            r#""path\\to\\file""#
+        );
         // Backticks should be escaped
         assert_eq!(shell_escape_for_expansion("`cmd`"), r#""\`cmd\`""#);
     }
@@ -906,8 +1150,14 @@ mod tests {
     #[test]
     fn test_shell_escape_for_expansion_with_spaces() {
         // Spaces are preserved in double quotes
-        assert_eq!(shell_escape_for_expansion("hello world"), r#""hello world""#);
-        assert_eq!(shell_escape_for_expansion("arg with $VAR"), r#""arg with $VAR""#);
+        assert_eq!(
+            shell_escape_for_expansion("hello world"),
+            r#""hello world""#
+        );
+        assert_eq!(
+            shell_escape_for_expansion("arg with $VAR"),
+            r#""arg with $VAR""#
+        );
     }
 
     #[test]
@@ -971,10 +1221,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("USER".to_string(), "alice".to_string());
         env.insert("HOST".to_string(), "server.com".to_string());
-        assert_eq!(
-            expand_vars("$USER@$HOST", &env),
-            r#""alice"@"server.com""#
-        );
+        assert_eq!(expand_vars("$USER@$HOST", &env), r#""alice"@"server.com""#);
     }
 
     #[test]
@@ -1011,9 +1258,15 @@ mod tests {
         env.insert("EMPTY".to_string(), "".to_string());
         // $EMPTYsuffix looks for "EMPTYsuffix" variable, not "EMPTY"
         // Since EMPTYsuffix doesn't exist, it remains as-is for shell expansion
-        assert_eq!(expand_vars("prefix$EMPTYsuffix", &env), "prefix$EMPTYsuffix");
+        assert_eq!(
+            expand_vars("prefix$EMPTYsuffix", &env),
+            "prefix$EMPTYsuffix"
+        );
         // Use ${EMPTY} to explicitly mark variable boundaries
-        assert_eq!(expand_vars("prefix${EMPTY}suffix", &env), r#"prefix""suffix"#);
+        assert_eq!(
+            expand_vars("prefix${EMPTY}suffix", &env),
+            r#"prefix""suffix"#
+        );
         // Direct usage should expand to empty string
         assert_eq!(expand_vars("$EMPTY", &env), r#""""#);
     }
@@ -1046,9 +1299,6 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("API_TOKEN".to_string(), "secret".to_string());
         assert_eq!(expand_vars("$API_TOKEN", &env), r#""secret""#);
-        assert_eq!(
-            expand_vars("${API_TOKEN}", &env),
-            r#""secret""#
-        );
+        assert_eq!(expand_vars("${API_TOKEN}", &env), r#""secret""#);
     }
 }

@@ -1,11 +1,11 @@
 # opz
 
-1Password CLI ラッパー - コマンドへのシームレスな secret 注入のためのツール
+1Password/Bitwarden CLI ラッパー - コマンドへのシームレスな secret 注入のためのツール
 
 ## 機能
 
 * キーワード検索でアイテムを検索
-* 1Password アイテムの secret を環境変数としてコマンド実行
+* 1Password または Bitwarden のアイテムの secret を環境変数としてコマンド実行
 * `gen` サブコマンドで env ファイル生成（既存ファイルに追記、重複キーは上書き）
 * 繰り返し実行を高速化するアイテムリストのキャッシュ
 * 完全一致がない場合のファジーマッチ
@@ -47,7 +47,8 @@ opz [OPTIONS] <ITEM> [ENV] -- <COMMAND>...
 ```
 
 オプション:
-* `--vault <NAME>` - Vault 名（省略時はすべての Vault を検索）
+* `--provider <op|bw>` - Secret の提供元（デフォルト: `op`）
+* `--vault <NAME>` - Vault 名（省略時はすべての Vault を検索、`op` のみ）
 
 引数:
 * `<ITEM>` - secret を取得するアイテムタイトル
@@ -68,6 +69,9 @@ opz example-item .env.local -- your-command
 
 # Vault を指定
 opz --vault Private example-item -- your-command
+
+# Bitwarden CLI を使う
+opz --provider bw example-item -- your-command
 ```
 
 ### Env ファイル生成
@@ -91,13 +95,16 @@ opz gen example-item .env.production
 
 # Vault を指定
 opz --vault Private gen example-item
+
+# Bitwarden CLI を使う
+opz --provider bw gen example-item
 ```
 
 ## 仕組み
 
-1. 1Password からアイテムリストを取得（60秒間キャッシュ）
+1. 指定プロバイダからアイテムリストを取得（60秒間キャッシュ）
 2. タイトルで一致するアイテムを検索（完全一致またはファジーマッチ）
-3. 各フィールドの secret 値を取得
+3. 各フィールドの参照または値を生成
 4. env ファイルパスが指定されている場合はファイルに書き込み（既存ファイルにマージ、重複キーは上書き）；指定がない場合は標準出力に出力
 5. 環境変数として secret を注入してコマンドを実行
 
@@ -131,6 +138,33 @@ sequenceDiagram
 
 **セキュリティ**: `opz` は secret へのアクセスと認証をすべて `op` CLI に委任します。アイテムリストはメタデータのみを 60 秒間キャッシュします。
 
+## `bw` コマンドの利用
+
+Bitwarden CLI の利用イメージ:
+
+```mermaid
+sequenceDiagram
+    participant opz
+    participant bw as bw CLI
+
+    Note over opz: ユーザー実行: opz --provider bw example-item -- claude "hello"
+
+    opz->>bw: bw list items
+    bw-->>opz: [{id, name}, ...]
+    Note over opz: "example-item" にマッチ → アイテム ID を取得
+
+    opz->>bw: bw get item <id>
+    bw-->>opz: {fields: [{name, value}, ...], login: {username, password}}
+    Note over opz: secret 値を解決<br/>（環境変数として注入）
+
+    Note over opz: オプション: .env ファイルを指定時は書き込み
+
+    opz->>bw: sh -c "claude \"hello\""
+    Note over opz: secret を含む環境変数で実行
+    bw-->>opz: 終了ステータス
+```
+
 ## 要件
 
 * [1Password CLI](https://developer.1password.com/docs/cli/) (`op`) がインストールされ、認証されていること
+* [Bitwarden CLI](https://bitwarden.com/ja-jp/help/cli/) (`bw`) がインストールされ、認証されていること（`--provider bw` 利用時）
