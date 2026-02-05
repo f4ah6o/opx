@@ -204,45 +204,9 @@ fn generate_env_output(cli: &Cli, item_title: &str, env_file: Option<&Path>) -> 
     Ok(())
 }
 
-/// Escape a string for use in a double-quoted shell context.
-/// Allows $VAR expansion while escaping other special characters.
-fn shell_escape_for_expansion(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + 2);
-    result.push('"');
-    for c in s.chars() {
-        match c {
-            '"' | '\\' | '`' => {
-                result.push('\\');
-                result.push(c);
-            }
-            _ => result.push(c),
-        }
-    }
-    result.push('"');
-    result
-}
-
-/// Escape a string as a shell literal (no expansion).
-/// Wraps in double quotes and escapes special chars to prevent further expansion.
-fn shell_escape_literal(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() * 2);
-    result.push('"');
-    for c in s.chars() {
-        match c {
-            '"' | '\\' | '`' | '$' => {
-                result.push('\\');
-                result.push(c);
-            }
-            _ => result.push(c),
-        }
-    }
-    result.push('"');
-    result
-}
-
 /// Expand $VAR and ${VAR} references in a string using provided environment variables.
 /// Only expands variables that exist in the provided map; others are left as-is
-/// for the shell to handle (e.g., $HOME, $PATH).
+/// (e.g., $HOME, $PATH).
 fn expand_vars(s: &str, env_vars: &HashMap<String, String>) -> String {
     let mut result = String::with_capacity(s.len() * 2);
     let mut chars = s.chars().peekable();
@@ -280,12 +244,11 @@ fn expand_vars(s: &str, env_vars: &HashMap<String, String>) -> String {
                 }
             }
 
-            // Look up the variable and replace, or keep original for shell expansion
+            // Look up the variable and replace, or keep original literal form
             if let Some(value) = env_vars.get(&var_name) {
-                // Escape the value for shell safety (no further expansion)
-                result.push_str(&shell_escape_literal(value));
+                result.push_str(value);
             } else {
-                // Variable not found in our env, keep $VAR for shell to handle
+                // Variable not found in our env, keep $VAR as-is
                 result.push('$');
                 result.push_str(&var_name);
             }
@@ -322,16 +285,11 @@ fn run_with_item(cli: &Cli, item_title: &str, env_file: Option<&Path>, command: 
         .map(|arg| expand_vars(arg, &env_vars))
         .collect();
 
-    // Build shell command string with proper escaping
-    let shell_cmd = expanded_args
-        .iter()
-        .map(|arg| shell_escape_for_expansion(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-
     let mut cmd = Command::new("sh");
     cmd.arg("-c");
-    cmd.arg(&shell_cmd);
+    cmd.arg("exec \"$@\"");
+    cmd.arg("sh");
+    cmd.args(&expanded_args);
 
     // Set environment variables for the child process
     for (key, value) in &env_vars {
@@ -884,64 +842,6 @@ mod tests {
         assert_eq!(field.label, Some("no_value_field".to_string()));
     }
 
-    #[test]
-    fn test_shell_escape_for_expansion_basic() {
-        // Simple string
-        assert_eq!(shell_escape_for_expansion("hello"), r#""hello""#);
-        // Variable should be preserved for shell expansion
-        assert_eq!(shell_escape_for_expansion("$VAR"), r#""$VAR""#);
-        assert_eq!(shell_escape_for_expansion("$API_TOKEN"), r#""$API_TOKEN""#);
-    }
-
-    #[test]
-    fn test_shell_escape_for_expansion_special_chars() {
-        // Double quotes should be escaped
-        assert_eq!(shell_escape_for_expansion(r#"say "hello""#), r#""say \"hello\"""#);
-        // Backslash should be escaped
-        assert_eq!(shell_escape_for_expansion(r#"path\to\file"#), r#""path\\to\\file""#);
-        // Backticks should be escaped
-        assert_eq!(shell_escape_for_expansion("`cmd`"), r#""\`cmd\`""#);
-    }
-
-    #[test]
-    fn test_shell_escape_for_expansion_with_spaces() {
-        // Spaces are preserved in double quotes
-        assert_eq!(shell_escape_for_expansion("hello world"), r#""hello world""#);
-        assert_eq!(shell_escape_for_expansion("arg with $VAR"), r#""arg with $VAR""#);
-    }
-
-    #[test]
-    fn test_shell_escape_for_expansion_curl_example() {
-        // Real-world curl header example
-        let input = "Authorization: Bearer $API_TOKEN";
-        let expected = r#""Authorization: Bearer $API_TOKEN""#;
-        assert_eq!(shell_escape_for_expansion(input), expected);
-    }
-
-    // ============================================
-    // Tests for shell_escape_literal()
-    // ============================================
-
-    #[test]
-    fn test_shell_escape_literal_basic() {
-        assert_eq!(shell_escape_literal("hello"), r#""hello""#);
-    }
-
-    #[test]
-    fn test_shell_escape_literal_dollar_sign() {
-        // Dollar sign should be escaped to prevent expansion
-        assert_eq!(shell_escape_literal("$VAR"), r#""\$VAR""#);
-        assert_eq!(shell_escape_literal("a$b"), r#""a\$b""#);
-    }
-
-    #[test]
-    fn test_shell_escape_literal_all_special_chars() {
-        assert_eq!(
-            shell_escape_literal(r#"a$b"c`d\"#),
-            r#""a\$b\"c\`d\\""# // Note: backslash and quote get escaped too
-        );
-    }
-
     // ============================================
     // Tests for expand_vars()
     // ============================================
@@ -950,20 +850,14 @@ mod tests {
     fn test_expand_vars_simple() {
         let mut env = HashMap::new();
         env.insert("API_TOKEN".to_string(), "secret123".to_string());
-        assert_eq!(
-            expand_vars("Bearer $API_TOKEN", &env),
-            r#"Bearer "secret123""#
-        );
+        assert_eq!(expand_vars("Bearer $API_TOKEN", &env), "Bearer secret123");
     }
 
     #[test]
     fn test_expand_vars_braced() {
         let mut env = HashMap::new();
         env.insert("HOST".to_string(), "example.com".to_string());
-        assert_eq!(
-            expand_vars("https://${HOST}/api", &env),
-            r#"https://"example.com"/api"#
-        );
+        assert_eq!(expand_vars("https://${HOST}/api", &env), "https://example.com/api");
     }
 
     #[test]
@@ -971,16 +865,13 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("USER".to_string(), "alice".to_string());
         env.insert("HOST".to_string(), "server.com".to_string());
-        assert_eq!(
-            expand_vars("$USER@$HOST", &env),
-            r#""alice"@"server.com""#
-        );
+        assert_eq!(expand_vars("$USER@$HOST", &env), "alice@server.com");
     }
 
     #[test]
     fn test_expand_vars_unknown_var() {
         let env = HashMap::new();
-        // Unknown vars should be preserved for shell expansion
+        // Unknown vars should be preserved as-is
         assert_eq!(expand_vars("$HOME/dir", &env), "$HOME/dir");
         assert_eq!(expand_vars("$PATH", &env), "$PATH");
     }
@@ -991,7 +882,7 @@ mod tests {
         env.insert("API_TOKEN".to_string(), "secret".to_string());
         assert_eq!(
             expand_vars("Authorization: $API_TOKEN for $HOME", &env),
-            r#"Authorization: "secret" for $HOME"#
+            "Authorization: secret for $HOME"
         );
     }
 
@@ -1000,9 +891,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("TOKEN".to_string(), "a$b\"c`d".to_string());
         let result = expand_vars("$TOKEN", &env);
-        // Special chars should be escaped
-        assert!(result.contains('\\'));
-        assert_eq!(result, r#""a\$b\"c\`d""#);
+        assert_eq!(result, r#"a$b"c`d"#);
     }
 
     #[test]
@@ -1013,9 +902,9 @@ mod tests {
         // Since EMPTYsuffix doesn't exist, it remains as-is for shell expansion
         assert_eq!(expand_vars("prefix$EMPTYsuffix", &env), "prefix$EMPTYsuffix");
         // Use ${EMPTY} to explicitly mark variable boundaries
-        assert_eq!(expand_vars("prefix${EMPTY}suffix", &env), r#"prefix""suffix"#);
+        assert_eq!(expand_vars("prefix${EMPTY}suffix", &env), "prefixsuffix");
         // Direct usage should expand to empty string
-        assert_eq!(expand_vars("$EMPTY", &env), r#""""#);
+        assert_eq!(expand_vars("$EMPTY", &env), "");
     }
 
     #[test]
@@ -1023,7 +912,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("API".to_string(), "test".to_string());
         // $API_TOKEN looks for "API_TOKEN" variable, not "API"
-        // Since API_TOKEN doesn't exist, it remains as-is for shell expansion
+        // Since API_TOKEN doesn't exist, it remains as-is
         assert_eq!(expand_vars("$API_TOKEN", &env), "$API_TOKEN");
     }
 
@@ -1038,17 +927,14 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("A".to_string(), "1".to_string());
         env.insert("B".to_string(), "2".to_string());
-        assert_eq!(expand_vars("$A$B", &env), r#""1""2""#);
+        assert_eq!(expand_vars("$A$B", &env), "12");
     }
 
     #[test]
     fn test_expand_vars_underscore_in_name() {
         let mut env = HashMap::new();
         env.insert("API_TOKEN".to_string(), "secret".to_string());
-        assert_eq!(expand_vars("$API_TOKEN", &env), r#""secret""#);
-        assert_eq!(
-            expand_vars("${API_TOKEN}", &env),
-            r#""secret""#
-        );
+        assert_eq!(expand_vars("$API_TOKEN", &env), "secret");
+        assert_eq!(expand_vars("${API_TOKEN}", &env), "secret");
     }
 }
