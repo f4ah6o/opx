@@ -143,7 +143,7 @@ fn main() -> Result<()> {
     }
 }
 
-/// Find and match item by title, returns (item_id, vault_name, item_title)
+/// Find and match item by title, returns (item_id, vault_id, item_title)
 fn find_item(vault: Option<&str>, item_title: &str) -> Result<(String, String, String)> {
     let items = item_list_cached(vault)?;
 
@@ -177,20 +177,23 @@ fn find_item(vault: Option<&str>, item_title: &str) -> Result<(String, String, S
 
     let item_id = matches[0].id.clone();
     let item = item_get(&item_id)?;
-    let vault_name = matches
-        .first()
-        .and_then(|m| m.vault.as_ref())
-        .or_else(|| item.vault.as_ref())
-        .map(|v| v.name.clone())
-        .ok_or_else(|| anyhow!("Vault name is required. Try specifying --vault."))?;
+    let vault_id = resolve_vault_id(
+        matches.first().and_then(|m| m.vault.as_ref()),
+        item.vault.as_ref(),
+    )
+        .ok_or_else(|| anyhow!("Vault ID is required. Try specifying --vault."))?;
 
-    Ok((item_id, vault_name, matches[0].title.clone()))
+    Ok((item_id, vault_id, matches[0].title.clone()))
+}
+
+fn resolve_vault_id(list_vault: Option<&ItemVault>, item_vault: Option<&ItemVault>) -> Option<String> {
+    list_vault.or(item_vault).map(|v| v.id.clone())
 }
 
 fn generate_env_output(cli: &Cli, item_title: &str, env_file: Option<&Path>) -> Result<()> {
-    let (item_id, vault_name, _) = find_item(cli.vault.as_deref(), item_title)?;
+    let (item_id, vault_id, _) = find_item(cli.vault.as_deref(), item_title)?;
     let item = item_get(&item_id)?;
-    let env_lines = item_to_env_lines(&item, &vault_name, &item_id)?;
+    let env_lines = item_to_env_lines(&item, &vault_id, &item_id)?;
 
     if let Some(path) = env_file {
         write_env_file(path, &env_lines)?;
@@ -261,9 +264,9 @@ fn expand_vars(s: &str, env_vars: &HashMap<String, String>) -> String {
 }
 
 fn run_with_item(cli: &Cli, item_title: &str, env_file: Option<&Path>, command: &[String]) -> Result<()> {
-    let (item_id, vault_name, _) = find_item(cli.vault.as_deref(), item_title)?;
+    let (item_id, vault_id, _) = find_item(cli.vault.as_deref(), item_title)?;
     let item = item_get(&item_id)?;
-    let env_lines = item_to_env_lines(&item, &vault_name, &item_id)?;
+    let env_lines = item_to_env_lines(&item, &vault_id, &item_id)?;
 
     if let Some(path) = env_file {
         write_env_file(path, &env_lines)?;
@@ -309,7 +312,7 @@ fn run_with_item(cli: &Cli, item_title: &str, env_file: Option<&Path>, command: 
     Ok(())
 }
 
-fn item_to_env_lines(item: &ItemGet, vault_name: &str, item_id: &str) -> Result<Vec<String>> {
+fn item_to_env_lines(item: &ItemGet, vault_id: &str, item_id: &str) -> Result<Vec<String>> {
     let re = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$")?;
     let mut out = Vec::new();
 
@@ -326,7 +329,7 @@ fn item_to_env_lines(item: &ItemGet, vault_name: &str, item_id: &str) -> Result<
             continue;
         }
 
-        let reference = format!("op://{}/{}/{}", vault_name, item_id, label);
+        let reference = format!("op://{}/{}/{}", vault_id, item_id, label);
         out.push(format!("{k}={v}", k = label, v = reference));
     }
 
@@ -518,7 +521,7 @@ mod tests {
     }
 
     fn env_lines(item: &ItemGet) -> Vec<String> {
-        item_to_env_lines(item, "Vault", "abc123").unwrap()
+        item_to_env_lines(item, "vault-id", "abc123").unwrap()
     }
 
     #[test]
@@ -529,8 +532,8 @@ mod tests {
         ]);
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 2);
-        assert!(lines.contains(&"API_KEY=op://Vault/abc123/API_KEY".to_string()));
-        assert!(lines.contains(&"DB_HOST=op://Vault/abc123/DB_HOST".to_string()));
+        assert!(lines.contains(&"API_KEY=op://vault-id/abc123/API_KEY".to_string()));
+        assert!(lines.contains(&"DB_HOST=op://vault-id/abc123/DB_HOST".to_string()));
     }
 
     #[test]
@@ -543,7 +546,7 @@ mod tests {
         ]);
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0], "VALID_KEY=op://Vault/abc123/VALID_KEY");
+        assert_eq!(lines[0], "VALID_KEY=op://vault-id/abc123/VALID_KEY");
     }
 
     #[test]
@@ -566,7 +569,7 @@ mod tests {
         ]);
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0], "VALID=op://Vault/abc123/VALID");
+        assert_eq!(lines[0], "VALID=op://vault-id/abc123/VALID");
     }
 
     #[test]
@@ -584,7 +587,22 @@ mod tests {
         ]);
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0], "HAS_VALUE=op://Vault/abc123/HAS_VALUE");
+        assert_eq!(lines[0], "HAS_VALUE=op://vault-id/abc123/HAS_VALUE");
+    }
+
+    #[test]
+    fn test_resolve_vault_id_prefers_id_even_with_unicode_name() {
+        let list_vault = ItemVault {
+            id: "vault-123".to_string(),
+            name: "情報管理共有".to_string(),
+        };
+        let item_vault = ItemVault {
+            id: "vault-fallback".to_string(),
+            name: "別名".to_string(),
+        };
+
+        let resolved = resolve_vault_id(Some(&list_vault), Some(&item_vault));
+        assert_eq!(resolved.as_deref(), Some("vault-123"));
     }
 
     // ============================================

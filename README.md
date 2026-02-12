@@ -97,7 +97,7 @@ opz --vault Private gen example-item
 
 1. Fetches item list from 1Password (cached for 60 seconds)
 2. Finds the matching item by title (exact or fuzzy match)
-3. Builds `op://<vault>/<item>/<field>` references for each field
+3. Builds `op://<vault_id>/<item>/<field>` references for each field (uses vault ID to avoid special/non-ASCII name issues)
 4. If env file is specified, writes the file with references (appends to existing, overwrites duplicate keys); otherwise outputs to stdout
 5. Runs the command with secrets injected as environment variables
 
