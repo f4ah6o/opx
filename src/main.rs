@@ -53,6 +53,17 @@ enum Cmd {
         env_file: Option<PathBuf>,
     },
 
+    /// Create a 1Password item from .env style file values
+    Create {
+        /// Item title to create
+        #[arg(value_name = "ITEM")]
+        item: String,
+
+        /// Source env file path (defaults to .env)
+        #[arg(value_name = "ENV")]
+        env_file: Option<PathBuf>,
+    },
+
     /// Run command with secrets from 1Password item
     Run {
         /// Item title
@@ -113,8 +124,10 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some(Cmd::Gen { item, env_file }) => {
-            generate_env_output(&cli, item, env_file.as_deref())
+        Some(Cmd::Gen { item, env_file }) => generate_env_output(&cli, item, env_file.as_deref()),
+        Some(Cmd::Create { item, env_file }) => {
+            let env_path = env_file.as_deref().unwrap_or_else(|| Path::new(".env"));
+            create_item_from_env(&cli, item, env_path)
         }
         Some(Cmd::Run {
             item,
@@ -141,6 +154,81 @@ fn main() -> Result<()> {
             run_with_item(&cli, item_title, cli.env_file.as_deref(), &cli.command)
         }
     }
+}
+
+fn create_item_from_env(cli: &Cli, item_title: &str, env_file: &Path) -> Result<()> {
+    let env_pairs = parse_env_file(env_file)?;
+    if env_pairs.is_empty() {
+        return Err(anyhow!(
+            "No valid env entries found in {}",
+            env_file.display()
+        ));
+    }
+
+    let mut cmd = Command::new("op");
+    cmd.arg("item")
+        .arg("create")
+        .arg("--category")
+        .arg("Secure Note")
+        .arg("--title")
+        .arg(item_title);
+
+    if let Some(vault) = cli.vault.as_deref() {
+        cmd.arg("--vault").arg(vault);
+    }
+
+    for (key, value) in env_pairs {
+        cmd.arg(format!("{}={}", key, value));
+    }
+
+    let status = cmd
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run `op item create`")?;
+
+    if !status.success() {
+        return Err(anyhow!("op item create failed with status: {}", status));
+    }
+
+    Ok(())
+}
+
+fn parse_env_file(path: &Path) -> Result<Vec<(String, String)>> {
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let label_re = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$")?;
+    let mut pairs = Vec::new();
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let normalized = line.strip_prefix("export ").unwrap_or(line);
+        let Some((raw_key, raw_value)) = normalized.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        if !label_re.is_match(key) {
+            eprintln!("Skipped invalid key in env file: {key}");
+            continue;
+        }
+
+        let mut value = raw_value.trim().to_string();
+        if value.len() >= 2 {
+            if (value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\''))
+            {
+                value = value[1..value.len() - 1].to_string();
+            }
+        }
+
+        pairs.push((key.to_string(), value));
+    }
+
+    Ok(pairs)
 }
 
 /// Find and match item by title, returns (item_id, vault_id, item_title)
@@ -381,9 +469,7 @@ fn write_env_file(path: &Path, new_lines: &[String]) -> Result<()> {
     // Build a map of new keys for quick lookup
     let new_keys: HashMap<String, &str> = new_lines
         .iter()
-        .filter_map(|line| {
-            parse_env_key(line).map(|key| (key.to_string(), line.as_str()))
-        })
+        .filter_map(|line| parse_env_key(line).map(|key| (key.to_string(), line.as_str())))
         .collect();
 
     let mut result_lines: Vec<String> = Vec::new();
@@ -391,8 +477,8 @@ fn write_env_file(path: &Path, new_lines: &[String]) -> Result<()> {
 
     // Read existing file and merge
     if path.exists() {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let content =
+            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
 
         for line in content.lines() {
             if let Some(key) = parse_env_key(line) {
@@ -718,7 +804,11 @@ mod tests {
         let file_path = tmp_dir.path().join(".env");
 
         // Write initial content with comments
-        fs::write(&file_path, "# This is a comment\nKEY1=value1\n\n# Another comment\n").unwrap();
+        fs::write(
+            &file_path,
+            "# This is a comment\nKEY1=value1\n\n# Another comment\n",
+        )
+        .unwrap();
 
         // Add new key
         let lines = vec![r#"KEY2="value2""#.to_string()];
@@ -861,6 +951,58 @@ mod tests {
     }
 
     // ============================================
+    // Tests for parse_env_file()
+    // ============================================
+
+    #[test]
+    fn test_parse_env_file_basic() {
+        let tmp_dir = TempDir::new().unwrap();
+        let file_path = tmp_dir.path().join(".env");
+        fs::write(&file_path, "API_KEY=secret\nDB_HOST=localhost\n").unwrap();
+
+        let pairs = parse_env_file(&file_path).unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], ("API_KEY".to_string(), "secret".to_string()));
+        assert_eq!(pairs[1], ("DB_HOST".to_string(), "localhost".to_string()));
+    }
+
+    #[test]
+    fn test_parse_env_file_handles_comments_export_and_quotes() {
+        let tmp_dir = TempDir::new().unwrap();
+        let file_path = tmp_dir.path().join(".env");
+        fs::write(
+            &file_path,
+            r#"# comment
+export TOKEN=abc
+QUOTED="hello"
+SINGLE='world'
+"#,
+        )
+        .unwrap();
+
+        let pairs = parse_env_file(&file_path).unwrap();
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[0], ("TOKEN".to_string(), "abc".to_string()));
+        assert_eq!(pairs[1], ("QUOTED".to_string(), "hello".to_string()));
+        assert_eq!(pairs[2], ("SINGLE".to_string(), "world".to_string()));
+    }
+
+    #[test]
+    fn test_parse_env_file_skips_invalid_keys() {
+        let tmp_dir = TempDir::new().unwrap();
+        let file_path = tmp_dir.path().join(".env");
+        fs::write(
+            &file_path,
+            "VALID=value\nINVALID-KEY=value\n1INVALID=value\n",
+        )
+        .unwrap();
+
+        let pairs = parse_env_file(&file_path).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0], ("VALID".to_string(), "value".to_string()));
+    }
+
+    // ============================================
     // Tests for expand_vars()
     // ============================================
 
@@ -875,7 +1017,10 @@ mod tests {
     fn test_expand_vars_braced() {
         let mut env = HashMap::new();
         env.insert("HOST".to_string(), "example.com".to_string());
-        assert_eq!(expand_vars("https://${HOST}/api", &env), "https://example.com/api");
+        assert_eq!(
+            expand_vars("https://${HOST}/api", &env),
+            "https://example.com/api"
+        );
     }
 
     #[test]
@@ -918,7 +1063,10 @@ mod tests {
         env.insert("EMPTY".to_string(), "".to_string());
         // $EMPTYsuffix looks for "EMPTYsuffix" variable, not "EMPTY"
         // Since EMPTYsuffix doesn't exist, it remains as-is for shell expansion
-        assert_eq!(expand_vars("prefix$EMPTYsuffix", &env), "prefix$EMPTYsuffix");
+        assert_eq!(
+            expand_vars("prefix$EMPTYsuffix", &env),
+            "prefix$EMPTYsuffix"
+        );
         // Use ${EMPTY} to explicitly mark variable boundaries
         assert_eq!(expand_vars("prefix${EMPTY}suffix", &env), "prefixsuffix");
         // Direct usage should expand to empty string
