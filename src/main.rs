@@ -342,12 +342,15 @@ fn find_item(vault: Option<&str>, item_title: &str) -> Result<(String, String, S
         matches.first().and_then(|m| m.vault.as_ref()),
         item.vault.as_ref(),
     )
-        .ok_or_else(|| anyhow!("Vault ID is required. Try specifying --vault."))?;
+    .ok_or_else(|| anyhow!("Vault ID is required. Try specifying --vault."))?;
 
     Ok((item_id, vault_id, matches[0].title.clone()))
 }
 
-fn resolve_vault_id(list_vault: Option<&ItemVault>, item_vault: Option<&ItemVault>) -> Option<String> {
+fn resolve_vault_id(
+    list_vault: Option<&ItemVault>,
+    item_vault: Option<&ItemVault>,
+) -> Option<String> {
     list_vault.or(item_vault).map(|v| v.id.clone())
 }
 
@@ -424,7 +427,12 @@ fn expand_vars(s: &str, env_vars: &HashMap<String, String>) -> String {
     result
 }
 
-fn run_with_item(cli: &Cli, item_title: &str, env_file: Option<&Path>, command: &[String]) -> Result<()> {
+fn run_with_item(
+    cli: &Cli,
+    item_title: &str,
+    env_file: Option<&Path>,
+    command: &[String],
+) -> Result<()> {
     let (item_id, vault_id, _) = find_item(cli.vault.as_deref(), item_title)?;
     let item = item_get(&item_id)?;
     let env_lines = item_to_env_lines(&item, &vault_id, &item_id)?;
