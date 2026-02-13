@@ -7,6 +7,7 @@
 * Find items by keyword search
 * Run commands with secrets from 1Password items as environment variables
 * Generate env files with `gen` subcommand (appends to existing, overwrites duplicates)
+* Create 1Password items from `.env` files with `create` subcommand
 * Item list caching for faster repeated runs
 * Fuzzy matching when exact title match is not found
 
@@ -91,6 +92,36 @@ opz gen example-item .env.production
 
 # Specify vault
 opz --vault Private gen example-item
+```
+
+### Create Item from `.env`
+
+Create a 1Password **API Credential** item from local env file values:
+
+```bash
+opz [OPTIONS] create <ITEM> [ENV]
+```
+
+Arguments:
+* `<ITEM>` - New 1Password item title
+* `[ENV]` - Source env file path (optional, defaults to `.env`)
+
+Behavior:
+* Creates an item in category `API Credential`
+* Adds each `KEY=VALUE` as a custom text field `KEY[text]=VALUE` (label = env key, value = env value)
+* Supports `export KEY=...`, inline comments (`KEY=value # note`), and keeps `#` inside quotes
+* For duplicate keys, the last entry wins
+
+Examples:
+```bash
+# Create item from .env
+opz create my-service
+
+# Create item from custom env file
+opz create my-service .env.production
+
+# Create item in specific vault
+opz --vault Private create my-service .env
 ```
 
 ## How It Works

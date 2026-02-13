@@ -7,6 +7,7 @@
 * キーワード検索でアイテムを検索
 * 1Password アイテムの secret を環境変数としてコマンド実行
 * `gen` サブコマンドで env ファイル生成（既存ファイルに追記、重複キーは上書き）
+* `create` サブコマンドで `.env` から opz 用アイテムを作成
 * 繰り返し実行を高速化するアイテムリストのキャッシュ
 * 完全一致がない場合のファジーマッチ
 
@@ -91,6 +92,36 @@ opz gen example-item .env.production
 
 # Vault を指定
 opz --vault Private gen example-item
+```
+
+### `.env` からアイテム作成
+
+ローカルの env ファイル値から、1Password の **API認証情報 (API Credential)** アイテムを作成:
+
+```bash
+opz [OPTIONS] create <ITEM> [ENV]
+```
+
+引数:
+* `<ITEM>` - 作成する 1Password アイテムタイトル
+* `[ENV]` - 読み込む env ファイルパス（省略時は `.env`）
+
+挙動:
+* カテゴリ `API Credential` でアイテムを作成
+* 各 `KEY=VALUE` を `KEY[text]=VALUE` のカスタムテキストフィールドとして追加（label=envキー, value=env値）
+* `export KEY=...`、インラインコメント（`KEY=value # note`）をサポートし、クォート内の `#` は保持
+* 重複キーは後勝ち
+
+例:
+```bash
+# .env から作成
+opz create my-service
+
+# カスタム env ファイルから作成
+opz create my-service .env.production
+
+# Vault を指定して作成
+opz --vault Private create my-service .env
 ```
 
 ## 仕組み
