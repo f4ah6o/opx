@@ -96,7 +96,7 @@ opz --vault Private gen example-item
 
 ### `.env` からアイテム作成
 
-ローカルの env ファイル値から、`opz` 互換の 1Password アイテムを作成:
+ローカルの env ファイル値から、1Password の **API認証情報 (API Credential)** アイテムを作成:
 
 ```bash
 opz [OPTIONS] create <ITEM> [ENV]
@@ -105,6 +105,12 @@ opz [OPTIONS] create <ITEM> [ENV]
 引数:
 * `<ITEM>` - 作成する 1Password アイテムタイトル
 * `[ENV]` - 読み込む env ファイルパス（省略時は `.env`）
+
+挙動:
+* カテゴリ `API Credential` でアイテムを作成
+* 各 `KEY=VALUE` を `KEY[text]=VALUE` のカスタムテキストフィールドとして追加（label=envキー, value=env値）
+* `export KEY=...`、インラインコメント（`KEY=value # note`）をサポートし、クォート内の `#` は保持
+* 重複キーは後勝ち
 
 例:
 ```bash

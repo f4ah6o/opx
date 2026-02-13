@@ -96,7 +96,7 @@ opz --vault Private gen example-item
 
 ### Create Item from `.env`
 
-Create an `opz`-compatible 1Password item from local env file values:
+Create a 1Password **API Credential** item from local env file values:
 
 ```bash
 opz [OPTIONS] create <ITEM> [ENV]
@@ -105,6 +105,12 @@ opz [OPTIONS] create <ITEM> [ENV]
 Arguments:
 * `<ITEM>` - New 1Password item title
 * `[ENV]` - Source env file path (optional, defaults to `.env`)
+
+Behavior:
+* Creates an item in category `API Credential`
+* Adds each `KEY=VALUE` as a custom text field `KEY[text]=VALUE` (label = env key, value = env value)
+* Supports `export KEY=...`, inline comments (`KEY=value # note`), and keeps `#` inside quotes
+* For duplicate keys, the last entry wins
 
 Examples:
 ```bash

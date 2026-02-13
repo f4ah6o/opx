@@ -165,21 +165,9 @@ fn create_item_from_env(cli: &Cli, item_title: &str, env_file: &Path) -> Result<
         ));
     }
 
+    let args = build_create_item_args(cli.vault.as_deref(), item_title, &env_pairs);
     let mut cmd = Command::new("op");
-    cmd.arg("item")
-        .arg("create")
-        .arg("--category")
-        .arg("Secure Note")
-        .arg("--title")
-        .arg(item_title);
-
-    if let Some(vault) = cli.vault.as_deref() {
-        cmd.arg("--vault").arg(vault);
-    }
-
-    for (key, value) in env_pairs {
-        cmd.arg(format!("{}={}", key, value));
-    }
+    cmd.args(&args);
 
     let status = cmd
         .stdin(Stdio::inherit())
@@ -195,6 +183,33 @@ fn create_item_from_env(cli: &Cli, item_title: &str, env_file: &Path) -> Result<
     Ok(())
 }
 
+fn build_create_item_args(
+    vault: Option<&str>,
+    item_title: &str,
+    env_pairs: &[(String, String)],
+) -> Vec<String> {
+    let mut args = vec![
+        "item".to_string(),
+        "create".to_string(),
+        "--category".to_string(),
+        "API Credential".to_string(),
+        "--title".to_string(),
+        item_title.to_string(),
+    ];
+
+    if let Some(v) = vault {
+        args.push("--vault".to_string());
+        args.push(v.to_string());
+    }
+
+    // key[text]=value creates a custom text field where the field label is the key.
+    for (key, value) in env_pairs {
+        args.push(format!("{}[text]={}", key, value));
+    }
+
+    args
+}
+
 fn parse_env_file(path: &Path) -> Result<Vec<(String, String)>> {
     let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let label_re = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$")?;
@@ -206,7 +221,10 @@ fn parse_env_file(path: &Path) -> Result<Vec<(String, String)>> {
             continue;
         }
 
-        let normalized = line.strip_prefix("export ").unwrap_or(line);
+        let normalized = match line.strip_prefix("export") {
+            Some(rest) if rest.chars().next().is_some_and(char::is_whitespace) => rest.trim_start(),
+            _ => line,
+        };
         let Some((raw_key, raw_value)) = normalized.split_once('=') else {
             continue;
         };
@@ -216,19 +234,74 @@ fn parse_env_file(path: &Path) -> Result<Vec<(String, String)>> {
             continue;
         }
 
-        let mut value = raw_value.trim().to_string();
-        if value.len() >= 2 {
-            if (value.starts_with('"') && value.ends_with('"'))
-                || (value.starts_with('\'') && value.ends_with('\''))
-            {
-                value = value[1..value.len() - 1].to_string();
-            }
+        let value = normalize_env_value(raw_value);
+
+        // Last occurrence wins for duplicate keys.
+        if let Some(pos) = pairs
+            .iter()
+            .position(|(existing_key, _)| existing_key == key)
+        {
+            pairs.remove(pos);
         }
 
         pairs.push((key.to_string(), value));
     }
 
     Ok(pairs)
+}
+
+fn normalize_env_value(raw_value: &str) -> String {
+    let mut value = strip_inline_comment(raw_value).trim().to_string();
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        value = value[1..value.len() - 1].to_string();
+    }
+    value
+}
+
+fn strip_inline_comment(value: &str) -> &str {
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped_in_double = false;
+
+    for (idx, ch) in value.char_indices() {
+        if in_double_quote {
+            if escaped_in_double {
+                escaped_in_double = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped_in_double = true;
+                continue;
+            }
+            if ch == '"' {
+                in_double_quote = false;
+            }
+            continue;
+        }
+
+        if in_single_quote {
+            if ch == '\'' {
+                in_single_quote = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_double_quote = true,
+            '\'' => in_single_quote = true,
+            '#' => {
+                if idx == 0 || value[..idx].chars().last().is_some_and(char::is_whitespace) {
+                    return value[..idx].trim_end();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    value
 }
 
 /// Find and match item by title, returns (item_id, vault_id, item_title)
@@ -1000,6 +1073,75 @@ SINGLE='world'
         let pairs = parse_env_file(&file_path).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], ("VALID".to_string(), "value".to_string()));
+    }
+
+    #[test]
+    fn test_parse_env_file_supports_inline_comments_and_hash_in_quotes() {
+        let tmp_dir = TempDir::new().unwrap();
+        let file_path = tmp_dir.path().join(".env");
+        fs::write(
+            &file_path,
+            r#"PLAIN=value # comment
+NO_COMMENT=value#hash
+DOUBLE="value # kept"
+SINGLE='value # kept'
+"#,
+        )
+        .unwrap();
+
+        let pairs = parse_env_file(&file_path).unwrap();
+        assert_eq!(pairs.len(), 4);
+        assert_eq!(pairs[0], ("PLAIN".to_string(), "value".to_string()));
+        assert_eq!(
+            pairs[1],
+            ("NO_COMMENT".to_string(), "value#hash".to_string())
+        );
+        assert_eq!(pairs[2], ("DOUBLE".to_string(), "value # kept".to_string()));
+        assert_eq!(pairs[3], ("SINGLE".to_string(), "value # kept".to_string()));
+    }
+
+    #[test]
+    fn test_parse_env_file_allows_export_with_multiple_spaces() {
+        let tmp_dir = TempDir::new().unwrap();
+        let file_path = tmp_dir.path().join(".env");
+        fs::write(&file_path, "export   TOKEN=abc\n").unwrap();
+
+        let pairs = parse_env_file(&file_path).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0], ("TOKEN".to_string(), "abc".to_string()));
+    }
+
+    #[test]
+    fn test_parse_env_file_duplicate_keys_last_wins() {
+        let tmp_dir = TempDir::new().unwrap();
+        let file_path = tmp_dir.path().join(".env");
+        fs::write(&file_path, "A=first\nB=keep\nA=last\n").unwrap();
+
+        let pairs = parse_env_file(&file_path).unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], ("B".to_string(), "keep".to_string()));
+        assert_eq!(pairs[1], ("A".to_string(), "last".to_string()));
+    }
+
+    #[test]
+    fn test_build_create_item_args_uses_api_credential_category_and_text_fields() {
+        let env_pairs = vec![
+            ("API_KEY".to_string(), "secret".to_string()),
+            ("DB_HOST".to_string(), "localhost".to_string()),
+        ];
+
+        let args = build_create_item_args(Some("Private"), "my-item", &env_pairs);
+
+        assert_eq!(args[0], "item");
+        assert_eq!(args[1], "create");
+        assert!(args.contains(&"--category".to_string()));
+        assert!(args.contains(&"API Credential".to_string()));
+        assert!(args.contains(&"--title".to_string()));
+        assert!(args.contains(&"my-item".to_string()));
+        assert!(args.contains(&"--vault".to_string()));
+        assert!(args.contains(&"Private".to_string()));
+        assert!(args.contains(&"API_KEY[text]=secret".to_string()));
+        assert!(args.contains(&"DB_HOST[text]=localhost".to_string()));
     }
 
     // ============================================
