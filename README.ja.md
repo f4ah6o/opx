@@ -7,7 +7,7 @@
 * キーワード検索でアイテムを検索
 * 1Password アイテムの secret を環境変数としてコマンド実行
 * `gen` サブコマンドで env ファイル生成（既存ファイルに追記、重複キーは上書き）
-* `create` サブコマンドで `.env` から opz 用アイテムを作成
+* `create` サブコマンドで `.env` または private 設定ファイルからアイテムを作成
 * 繰り返し実行を高速化するアイテムリストのキャッシュ
 * 完全一致がない場合のファジーマッチ
 
@@ -94,31 +94,39 @@ opz gen example-item .env.production
 opz --vault Private gen example-item
 ```
 
-### `.env` からアイテム作成
+### `.env` または private 設定ファイルからアイテム作成
 
-ローカルの env ファイル値から、1Password の **API認証情報 (API Credential)** アイテムを作成:
+`create` は `[ENV]` によって2つのモードで動作します:
 
 ```bash
 opz [OPTIONS] create <ITEM> [ENV]
 ```
 
 引数:
-* `<ITEM>` - 作成する 1Password アイテムタイトル
-* `[ENV]` - 読み込む env ファイルパス（省略時は `.env`）
+* `<ITEM>` - `.env` モードで作成する 1Password アイテムタイトル
+* `[ENV]` - 読み込むファイルパス（省略時は `.env`）
 
 挙動:
-* カテゴリ `API Credential` でアイテムを作成
-* 各 `KEY=VALUE` を `KEY[text]=VALUE` のカスタムテキストフィールドとして追加（label=envキー, value=env値）
-* `export KEY=...`、インラインコメント（`KEY=value # note`）をサポートし、クォート内の `#` は保持
-* 重複キーは後勝ち
+* `[ENV]` が厳密に `.env` の場合:
+  * カテゴリ `API Credential` でアイテムを作成
+  * タイトルは `<ITEM>` を使用
+  * 各 `KEY=VALUE` を `KEY[text]=VALUE` のカスタムテキストフィールドとして追加
+  * `export KEY=...`、インラインコメント（`KEY=value # note`）をサポートし、クォート内の `#` は保持
+  * 重複キーは後勝ち
+* `[ENV]` が `.env` 以外の場合:
+  * カテゴリ `Secure Note` でアイテムを作成
+  * 本文フォーマットは ```` ```<file name>\n<content>\n``` ````
+  * タイトルは git remote URL から抽出した `org/repo` を使用
+  * remote が複数ある場合は remote ごとに作成し、同名時は `-2`, `-3`... を付与
+  * 解釈可能な git remote がない場合はエラー終了
 
 例:
 ```bash
 # .env から作成
 opz create my-service
 
-# カスタム env ファイルから作成
-opz create my-service .env.production
+# private 設定ファイルを Secure Note として保存（タイトルは remote の org/repo）
+opz create ignored-item app.conf
 
 # Vault を指定して作成
 opz --vault Private create my-service .env

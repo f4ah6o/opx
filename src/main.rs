@@ -53,14 +53,15 @@ enum Cmd {
         env_file: Option<PathBuf>,
     },
 
-    /// Create a 1Password item from .env style file values
+    #[command(about = "Create a 1Password item from .env or private config file")]
     Create {
-        /// Item title to create
-        #[arg(value_name = "ITEM")]
+        #[arg(value_name = "ITEM", help = "Item title used when ENV is exactly .env")]
         item: String,
 
-        /// Source env file path (defaults to .env)
-        #[arg(value_name = "ENV")]
+        #[arg(
+            value_name = "ENV",
+            help = "Source file path (defaults to .env). Non-.env creates Secure Note(s) named from git remotes."
+        )]
         env_file: Option<PathBuf>,
     },
 
@@ -157,6 +158,18 @@ fn main() -> Result<()> {
 }
 
 fn create_item_from_env(cli: &Cli, item_title: &str, env_file: &Path) -> Result<()> {
+    if !is_exact_dotenv(env_file) {
+        return create_secure_notes_from_file(cli, env_file);
+    }
+
+    create_api_credential_item_from_env(cli, item_title, env_file)
+}
+
+fn is_exact_dotenv(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some(".env")
+}
+
+fn create_api_credential_item_from_env(cli: &Cli, item_title: &str, env_file: &Path) -> Result<()> {
     let env_pairs = parse_env_file(env_file)?;
     if env_pairs.is_empty() {
         return Err(anyhow!(
@@ -166,21 +179,7 @@ fn create_item_from_env(cli: &Cli, item_title: &str, env_file: &Path) -> Result<
     }
 
     let args = build_create_item_args(cli.vault.as_deref(), item_title, &env_pairs);
-    let mut cmd = Command::new("op");
-    cmd.args(&args);
-
-    let status = cmd
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("failed to run `op item create`")?;
-
-    if !status.success() {
-        return Err(anyhow!("op item create failed with status: {}", status));
-    }
-
-    Ok(())
+    run_op_item_create(&args)
 }
 
 fn build_create_item_args(
@@ -208,6 +207,159 @@ fn build_create_item_args(
     }
 
     args
+}
+
+fn create_secure_notes_from_file(cli: &Cli, file_path: &Path) -> Result<()> {
+    let content =
+        fs::read_to_string(file_path).with_context(|| format!("read {}", file_path.display()))?;
+    let file_name = file_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| anyhow!("invalid file path: {}", file_path.display()))?;
+    let body = build_secure_note_body(&file_name, &content);
+
+    let remote_repo_names = list_remote_repo_names()?;
+    let item_titles = dedupe_titles_with_sequence(&remote_repo_names);
+
+    for item_title in item_titles {
+        let args = build_create_secure_note_args(cli.vault.as_deref(), &item_title, &body);
+        run_op_item_create(&args)?;
+    }
+
+    Ok(())
+}
+
+fn build_secure_note_body(file_name: &str, content: &str) -> String {
+    let mut body = format!("```{}\n", file_name);
+    body.push_str(content);
+    if !content.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str("```");
+    body
+}
+
+fn build_create_secure_note_args(vault: Option<&str>, item_title: &str, body: &str) -> Vec<String> {
+    let mut args = vec![
+        "item".to_string(),
+        "create".to_string(),
+        "--category".to_string(),
+        "Secure Note".to_string(),
+        "--title".to_string(),
+        item_title.to_string(),
+    ];
+
+    if let Some(v) = vault {
+        args.push("--vault".to_string());
+        args.push(v.to_string());
+    }
+
+    args.push(format!("notesPlain={}", body));
+    args
+}
+
+fn run_op_item_create(args: &[String]) -> Result<()> {
+    let mut cmd = Command::new("op");
+    cmd.args(args);
+
+    let status = cmd
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run `op item create`")?;
+
+    if !status.success() {
+        return Err(anyhow!("op item create failed with status: {}", status));
+    }
+
+    Ok(())
+}
+
+fn list_remote_repo_names() -> Result<Vec<String>> {
+    let out = Command::new("git")
+        .args(["config", "--get-regexp", r"^remote\..*\.url$"])
+        .output()
+        .context("failed to run `git config --get-regexp '^remote\\..*\\.url$'`")?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(anyhow!(
+            "failed to read git remotes: {}",
+            if stderr.is_empty() {
+                "no remote configured"
+            } else {
+                &stderr
+            }
+        ));
+    }
+
+    let stdout = String::from_utf8(out.stdout).context("git output was not valid UTF-8")?;
+    let mut repo_names = Vec::new();
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let _key = parts.next();
+        let Some(url) = parts.next() else {
+            continue;
+        };
+        if let Some(repo_name) = extract_org_repo_from_remote_url(url) {
+            repo_names.push(repo_name);
+        }
+    }
+
+    if repo_names.is_empty() {
+        return Err(anyhow!(
+            "no parseable git remotes found; non-.env create requires at least one remote URL like https://host/org/repo.git"
+        ));
+    }
+
+    Ok(repo_names)
+}
+
+fn extract_org_repo_from_remote_url(url: &str) -> Option<String> {
+    let stripped = url.split(['?', '#']).next()?;
+    let path = if let Some((_, rest)) = stripped.split_once("://") {
+        let (host_part, path_part) = rest.split_once('/')?;
+        if host_part.is_empty() {
+            return None;
+        }
+        path_part
+    } else if stripped.contains('@') && stripped.contains(':') {
+        let (_, path_part) = stripped.split_once(':')?;
+        path_part
+    } else {
+        return None;
+    };
+
+    let normalized = path.trim_matches('/').trim_end_matches(".git");
+    let segments: Vec<&str> = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() < 2 {
+        return None;
+    }
+
+    let org = segments[segments.len() - 2];
+    let repo = segments[segments.len() - 1];
+    Some(format!("{org}/{repo}"))
+}
+
+fn dedupe_titles_with_sequence(base_titles: &[String]) -> Vec<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut titles = Vec::with_capacity(base_titles.len());
+
+    for base in base_titles {
+        let count = counts.entry(base.clone()).or_insert(0);
+        *count += 1;
+        if *count == 1 {
+            titles.push(base.clone());
+        } else {
+            titles.push(format!("{}-{}", base, count));
+        }
+    }
+
+    titles
 }
 
 fn parse_env_file(path: &Path) -> Result<Vec<(String, String)>> {
@@ -1150,6 +1302,72 @@ SINGLE='value # kept'
         assert!(args.contains(&"Private".to_string()));
         assert!(args.contains(&"API_KEY[text]=secret".to_string()));
         assert!(args.contains(&"DB_HOST[text]=localhost".to_string()));
+    }
+
+    #[test]
+    fn test_is_exact_dotenv() {
+        assert!(is_exact_dotenv(Path::new(".env")));
+        assert!(!is_exact_dotenv(Path::new(".env.local")));
+        assert!(!is_exact_dotenv(Path::new("config/.env.production")));
+        assert!(!is_exact_dotenv(Path::new("secrets.toml")));
+    }
+
+    #[test]
+    fn test_extract_org_repo_from_remote_url() {
+        assert_eq!(
+            extract_org_repo_from_remote_url("https://github.com/f4ah6o/opz.git"),
+            Some("f4ah6o/opz".to_string())
+        );
+        assert_eq!(
+            extract_org_repo_from_remote_url("git@github.com:f4ah6o/opz.git"),
+            Some("f4ah6o/opz".to_string())
+        );
+        assert_eq!(
+            extract_org_repo_from_remote_url("ssh://git@github.com/f4ah6o/opz.git"),
+            Some("f4ah6o/opz".to_string())
+        );
+        assert_eq!(extract_org_repo_from_remote_url("file:///tmp/opz"), None);
+    }
+
+    #[test]
+    fn test_dedupe_titles_with_sequence() {
+        let base = vec![
+            "a/b".to_string(),
+            "a/b".to_string(),
+            "c/d".to_string(),
+            "a/b".to_string(),
+        ];
+        let deduped = dedupe_titles_with_sequence(&base);
+        assert_eq!(
+            deduped,
+            vec![
+                "a/b".to_string(),
+                "a/b-2".to_string(),
+                "c/d".to_string(),
+                "a/b-3".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_secure_note_body() {
+        let body = build_secure_note_body("app.conf", "line1\nline2");
+        assert_eq!(body, "```app.conf\nline1\nline2\n```");
+    }
+
+    #[test]
+    fn test_build_create_secure_note_args() {
+        let args = build_create_secure_note_args(Some("Private"), "f4ah6o/opz", "```a\nb\n```");
+
+        assert_eq!(args[0], "item");
+        assert_eq!(args[1], "create");
+        assert!(args.contains(&"--category".to_string()));
+        assert!(args.contains(&"Secure Note".to_string()));
+        assert!(args.contains(&"--title".to_string()));
+        assert!(args.contains(&"f4ah6o/opz".to_string()));
+        assert!(args.contains(&"--vault".to_string()));
+        assert!(args.contains(&"Private".to_string()));
+        assert!(args.contains(&"notesPlain=```a\nb\n```".to_string()));
     }
 
     // ============================================

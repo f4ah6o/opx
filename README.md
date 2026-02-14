@@ -7,7 +7,7 @@
 * Find items by keyword search
 * Run commands with secrets from 1Password items as environment variables
 * Generate env files with `gen` subcommand (appends to existing, overwrites duplicates)
-* Create 1Password items from `.env` files with `create` subcommand
+* Create 1Password items from `.env` files or private config files with `create` subcommand
 * Item list caching for faster repeated runs
 * Fuzzy matching when exact title match is not found
 
@@ -94,31 +94,39 @@ opz gen example-item .env.production
 opz --vault Private gen example-item
 ```
 
-### Create Item from `.env`
+### Create Item from `.env` or Private Config
 
-Create a 1Password **API Credential** item from local env file values:
+`create` has two modes depending on `[ENV]`:
 
 ```bash
 opz [OPTIONS] create <ITEM> [ENV]
 ```
 
 Arguments:
-* `<ITEM>` - New 1Password item title
-* `[ENV]` - Source env file path (optional, defaults to `.env`)
+* `<ITEM>` - New item title for `.env` mode
+* `[ENV]` - Source file path (optional, defaults to `.env`)
 
 Behavior:
-* Creates an item in category `API Credential`
-* Adds each `KEY=VALUE` as a custom text field `KEY[text]=VALUE` (label = env key, value = env value)
-* Supports `export KEY=...`, inline comments (`KEY=value # note`), and keeps `#` inside quotes
-* For duplicate keys, the last entry wins
+* If `[ENV]` is exactly `.env`:
+  * Creates an item in category `API Credential`
+  * Uses `<ITEM>` as title
+  * Adds each `KEY=VALUE` as a custom text field `KEY[text]=VALUE`
+  * Supports `export KEY=...`, inline comments (`KEY=value # note`), and keeps `#` inside quotes
+  * For duplicate keys, the last entry wins
+* If `[ENV]` is anything other than `.env`:
+  * Creates item(s) in category `Secure Note`
+  * Builds note body as ```` ```<file name>\n<content>\n``` ````
+  * Uses git remote repo name (`org/repo`) as item title
+  * If multiple remotes exist, creates one item per remote; duplicate titles get `-2`, `-3`, ...
+  * Fails if no parseable git remote is available
 
 Examples:
 ```bash
 # Create item from .env
 opz create my-service
 
-# Create item from custom env file
-opz create my-service .env.production
+# Save private config as Secure Note (title from git remote org/repo)
+opz create ignored-item app.conf
 
 # Create item in specific vault
 opz --vault Private create my-service .env
