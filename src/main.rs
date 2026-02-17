@@ -387,6 +387,10 @@ fn parse_env_file(path: &Path) -> Result<Vec<(String, String)>> {
         }
 
         let value = normalize_env_value(raw_value);
+        if is_op_reference(&value) {
+            eprintln!("Skipped already imported op:// value for key: {key}");
+            continue;
+        }
 
         // Last occurrence wins for duplicate keys.
         if let Some(pos) = pairs
@@ -454,6 +458,10 @@ fn strip_inline_comment(value: &str) -> &str {
     }
 
     value
+}
+
+fn is_op_reference(value: &str) -> bool {
+    value.starts_with("op://")
 }
 
 /// Find and match item by title, returns (item_id, vault_id, item_title)
@@ -1281,6 +1289,27 @@ SINGLE='value # kept'
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0], ("B".to_string(), "keep".to_string()));
         assert_eq!(pairs[1], ("A".to_string(), "last".to_string()));
+    }
+
+    #[test]
+    fn test_parse_env_file_skips_existing_op_references() {
+        let tmp_dir = TempDir::new().unwrap();
+        let file_path = tmp_dir.path().join(".env");
+        fs::write(
+            &file_path,
+            "NEW_SECRET=plain\nEXISTING=op://vault/item/EXISTING\n",
+        )
+        .unwrap();
+
+        let pairs = parse_env_file(&file_path).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0], ("NEW_SECRET".to_string(), "plain".to_string()));
+    }
+
+    #[test]
+    fn test_is_op_reference() {
+        assert!(is_op_reference("op://vault/item/key"));
+        assert!(!is_op_reference("value"));
     }
 
     #[test]
