@@ -44,31 +44,35 @@ opz find baz
 1Password アイテムの secret を環境変数としてコマンドを実行:
 
 ```bash
-opz [OPTIONS] <ITEM> [ENV] -- <COMMAND>...
+opz run [OPTIONS] [--env-file <ENV>] <ITEM>... -- <COMMAND>...
+opz [OPTIONS] [--env-file <ENV>] <ITEM>... -- <COMMAND>...
 ```
 
 オプション:
 * `--vault <NAME>` - Vault 名（省略時はすべての Vault を検索）
+* `--env-file <ENV>` - 出力 env ファイルパス（省略時はファイル生成なし）
 
 引数:
-* `<ITEM>` - secret を取得するアイテムタイトル
-* `[ENV]` - 出力 env ファイルパス（省略時はファイル生成なし）
+* `<ITEM>...` - secret を取得する 1 つ以上のアイテムタイトル
 
-`[ENV]` を指定した場合、env ファイルはコマンド実行後も保持されます。既存ファイルがある場合は追記され、重複キーは上書きされます。
+`--env-file` を指定した場合、env ファイルはコマンド実行後も保持されます。既存ファイルがある場合は追記され、重複キーは上書きされます。複数アイテム間で同名キーがある場合は後勝ちです（`opz run foo bar ...` では `bar` が優先）。
 
 例:
 ```bash
-# secret 付きでコマンド実行（.env ファイルは生成されない）
-opz example-item -- your-command
+# 1アイテムで実行（.env ファイルは生成されない）
+opz run example-item -- your-command
+
+# 複数アイテムで実行（重複キーは後勝ち）
+opz run foo bar -- your-command
 
 # secret を注入して .env ファイルも生成
-opz example-item .env -- your-command
+opz run --env-file .env foo bar -- your-command
 
-# カスタム env ファイルパスを指定
-opz example-item .env.local -- your-command
+# 短縮形でも複数アイテム対応
+opz --env-file .env.local foo bar -- your-command
 
 # Vault を指定
-opz --vault Private example-item -- your-command
+opz run --vault Private foo bar -- your-command
 ```
 
 ### Env ファイル生成
@@ -76,23 +80,25 @@ opz --vault Private example-item -- your-command
 コマンド実行なしで env ファイルのみを生成:
 
 ```bash
-opz gen <ITEM> [ENV]
+opz gen [OPTIONS] [--env-file <ENV>] <ITEM>...
 ```
 
 例:
 ```bash
-# 標準出力に出力
-opz gen example-item
+# セクション付きで標準出力
+opz gen foo bar
 
 # .env ファイルを生成
-opz gen example-item .env
+opz gen --env-file .env foo bar
 
 # カスタムパスに生成
-opz gen example-item .env.production
+opz gen --env-file .env.production foo bar
 
 # Vault を指定
-opz --vault Private gen example-item
+opz --vault Private gen foo bar
 ```
+
+標準出力は `# --- item: <title> ---` のコメント見出し付きです（コメント行は `.env` パーサで無視されます）。
 
 ### `.env` または private 設定ファイルからアイテム作成
 

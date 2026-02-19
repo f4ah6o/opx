@@ -21,16 +21,16 @@ struct Cli {
     #[arg(long, global = true)]
     vault: Option<String>,
 
+    /// Output env file path (optional, no file generated if omitted)
+    #[arg(long, value_name = "ENV")]
+    env_file: Option<PathBuf>,
+
     #[command(subcommand)]
     cmd: Option<Cmd>,
 
-    /// Item title (when not using subcommand)
+    /// Item titles (when not using subcommand)
     #[arg(value_name = "ITEM")]
-    item_title: Option<String>,
-
-    /// Output env file path (optional, no file generated if omitted)
-    #[arg(value_name = "ENV")]
-    env_file: Option<PathBuf>,
+    items: Vec<String>,
 
     /// Command to run (after --)
     #[arg(last = true)]
@@ -44,13 +44,13 @@ enum Cmd {
 
     /// Generate env file only (do not run command). Appends to existing file, overwrites duplicate keys.
     Gen {
-        /// Item title
-        #[arg(value_name = "ITEM")]
-        item: String,
-
         /// Output env file path (optional, no file generated if omitted)
-        #[arg(value_name = "ENV")]
+        #[arg(long, value_name = "ENV")]
         env_file: Option<PathBuf>,
+
+        /// Item titles
+        #[arg(value_name = "ITEM", num_args = 1..)]
+        items: Vec<String>,
     },
 
     #[command(about = "Create a 1Password item from .env or private config file")]
@@ -62,18 +62,18 @@ enum Cmd {
             value_name = "ENV",
             help = "Source file path (defaults to .env). Non-.env creates Secure Note(s) named from git remotes."
         )]
-        env_file: Option<PathBuf>,
+        source_file: Option<PathBuf>,
     },
 
     /// Run command with secrets from 1Password item
     Run {
-        /// Item title
-        #[arg(value_name = "ITEM")]
-        item: String,
-
         /// Output env file path (optional, no file generated if omitted)
-        #[arg(value_name = "ENV")]
+        #[arg(long, value_name = "ENV")]
         env_file: Option<PathBuf>,
+
+        /// Item titles
+        #[arg(value_name = "ITEM", num_args = 1..)]
+        items: Vec<String>,
 
         /// Command to run (after --)
         #[arg(last = true)]
@@ -125,36 +125,102 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some(Cmd::Gen { item, env_file }) => generate_env_output(&cli, item, env_file.as_deref()),
-        Some(Cmd::Create { item, env_file }) => {
-            let env_path = env_file.as_deref().unwrap_or_else(|| Path::new(".env"));
+        Some(Cmd::Gen { items, env_file }) => generate_env_output(&cli, items, env_file.as_deref()),
+        Some(Cmd::Create { item, source_file }) => {
+            let env_path = source_file.as_deref().unwrap_or_else(|| Path::new(".env"));
             create_item_from_env(&cli, item, env_path)
         }
         Some(Cmd::Run {
-            item,
+            items,
             env_file,
             command,
         }) => {
             if command.is_empty() {
                 return Err(anyhow!(
-                    "Command required after '--'. Usage: opz run <ITEM> [ENV] -- <COMMAND>..."
+                    "Command required after '--'. Usage: opz run [OPTIONS] [--env-file <ENV>] <ITEM>... -- <COMMAND>..."
                 ));
             }
-            run_with_item(&cli, item, env_file.as_deref(), command)
+            run_with_items(&cli, items, env_file.as_deref(), command)
         }
         None => {
-            let item_title = cli.item_title.as_ref().ok_or_else(|| {
-                anyhow!("Item title required. Usage: opz [OPTIONS] <ITEM> [ENV] -- <COMMAND>...")
-            })?;
+            if cli.items.is_empty() {
+                return Err(anyhow!(
+                    "At least one item title is required. Usage: opz [OPTIONS] [--env-file <ENV>] <ITEM>... -- <COMMAND>..."
+                ));
+            }
 
             if cli.command.is_empty() {
                 return Err(anyhow!(
-                    "Command required after '--'. Usage: opz [OPTIONS] <ITEM> [ENV] -- <COMMAND>..."
+                    "Command required after '--'. Usage: opz [OPTIONS] [--env-file <ENV>] <ITEM>... -- <COMMAND>..."
                 ));
             }
-            run_with_item(&cli, item_title, cli.env_file.as_deref(), &cli.command)
+            run_with_items(&cli, &cli.items, cli.env_file.as_deref(), &cli.command)
         }
     }
+}
+
+fn collect_item_env_sections(cli: &Cli, items: &[String]) -> Result<Vec<(String, Vec<String>)>> {
+    let mut sections = Vec::with_capacity(items.len());
+
+    for item_title in items {
+        let (item_id, vault_id, resolved_title) = find_item(cli.vault.as_deref(), item_title)?;
+        let item = item_get(&item_id)?;
+        let env_lines = item_to_env_lines(&item, &vault_id, &item_id)?;
+        sections.push((resolved_title, env_lines));
+    }
+
+    Ok(sections)
+}
+
+fn merge_env_lines(sections: &[(String, Vec<String>)]) -> Vec<String> {
+    let mut merged_lines: Vec<String> = Vec::new();
+    let mut key_positions: HashMap<String, usize> = HashMap::new();
+
+    for (_, lines) in sections {
+        for line in lines {
+            if let Some(key) = parse_env_key(line) {
+                if let Some(&idx) = key_positions.get(key) {
+                    merged_lines[idx] = line.clone();
+                } else {
+                    key_positions.insert(key.to_string(), merged_lines.len());
+                    merged_lines.push(line.clone());
+                }
+            }
+        }
+    }
+
+    merged_lines
+}
+
+fn resolve_env_vars(env_lines: &[String]) -> Result<HashMap<String, String>> {
+    let mut env_vars: HashMap<String, String> = HashMap::new();
+    for line in env_lines {
+        if let Some((key, reference)) = parse_env_line_kv(line) {
+            let value = op_read(reference)?;
+            env_vars.insert(key.to_string(), value);
+        }
+    }
+
+    Ok(env_vars)
+}
+
+fn print_sectioned_env_output(sections: &[(String, Vec<String>)]) {
+    print!("{}", sectioned_env_output_string(sections));
+}
+
+fn sectioned_env_output_string(sections: &[(String, Vec<String>)]) -> String {
+    let mut out = String::new();
+    for (idx, (title, lines)) in sections.iter().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("# --- item: {} ---\n", title));
+        for line in lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn create_item_from_env(cli: &Cli, item_title: &str, env_file: &Path) -> Result<()> {
@@ -514,19 +580,15 @@ fn resolve_vault_id(
     list_vault.or(item_vault).map(|v| v.id.clone())
 }
 
-fn generate_env_output(cli: &Cli, item_title: &str, env_file: Option<&Path>) -> Result<()> {
-    let (item_id, vault_id, _) = find_item(cli.vault.as_deref(), item_title)?;
-    let item = item_get(&item_id)?;
-    let env_lines = item_to_env_lines(&item, &vault_id, &item_id)?;
+fn generate_env_output(cli: &Cli, items: &[String], env_file: Option<&Path>) -> Result<()> {
+    let sections = collect_item_env_sections(cli, items)?;
+    let merged_env_lines = merge_env_lines(&sections);
 
     if let Some(path) = env_file {
-        write_env_file(path, &env_lines)?;
+        write_env_file(path, &merged_env_lines)?;
         eprintln!("Generated: {}", path.display());
     } else {
-        // 標準出力に出力
-        for line in env_lines {
-            println!("{}", line);
-        }
+        print_sectioned_env_output(&sections);
     }
     Ok(())
 }
@@ -587,29 +649,22 @@ fn expand_vars(s: &str, env_vars: &HashMap<String, String>) -> String {
     result
 }
 
-fn run_with_item(
+fn run_with_items(
     cli: &Cli,
-    item_title: &str,
+    items: &[String],
     env_file: Option<&Path>,
     command: &[String],
 ) -> Result<()> {
-    let (item_id, vault_id, _) = find_item(cli.vault.as_deref(), item_title)?;
-    let item = item_get(&item_id)?;
-    let env_lines = item_to_env_lines(&item, &vault_id, &item_id)?;
+    let sections = collect_item_env_sections(cli, items)?;
+    let merged_env_lines = merge_env_lines(&sections);
 
     if let Some(path) = env_file {
-        write_env_file(path, &env_lines)?;
+        write_env_file(path, &merged_env_lines)?;
         eprintln!("Generated: {}", path.display());
     }
 
     // First pass: collect all environment variable values
-    let mut env_vars: HashMap<String, String> = HashMap::new();
-    for line in &env_lines {
-        if let Some((key, reference)) = parse_env_line_kv(line) {
-            let value = op_read(&reference)?;
-            env_vars.insert(key.to_string(), value);
-        }
-    }
+    let env_vars = resolve_env_vars(&merged_env_lines)?;
 
     // Second pass: expand $VAR references in command arguments
     let expanded_args: Vec<String> = command
@@ -1499,5 +1554,137 @@ SINGLE='value # kept'
         env.insert("API_TOKEN".to_string(), "secret".to_string());
         assert_eq!(expand_vars("$API_TOKEN", &env), "secret");
         assert_eq!(expand_vars("${API_TOKEN}", &env), "secret");
+    }
+
+    #[test]
+    fn test_merge_env_lines_last_item_wins() {
+        let sections = vec![
+            (
+                "foo".to_string(),
+                vec![
+                    "A=op://vault1/item1/A".to_string(),
+                    "B=op://vault1/item1/B".to_string(),
+                ],
+            ),
+            (
+                "bar".to_string(),
+                vec![
+                    "A=op://vault2/item2/A".to_string(),
+                    "C=op://vault2/item2/C".to_string(),
+                ],
+            ),
+        ];
+
+        let merged = merge_env_lines(&sections);
+        assert_eq!(
+            merged,
+            vec![
+                "A=op://vault2/item2/A".to_string(),
+                "B=op://vault1/item1/B".to_string(),
+                "C=op://vault2/item2/C".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_sectioned_env_output_string() {
+        let sections = vec![
+            (
+                "foo".to_string(),
+                vec!["A=op://v1/i1/A".to_string(), "B=op://v1/i1/B".to_string()],
+            ),
+            ("bar".to_string(), vec!["C=op://v2/i2/C".to_string()]),
+        ];
+
+        let rendered = sectioned_env_output_string(&sections);
+        assert_eq!(
+            rendered,
+            "# --- item: foo ---\nA=op://v1/i1/A\nB=op://v1/i1/B\n\n# --- item: bar ---\nC=op://v2/i2/C\n"
+        );
+    }
+
+    #[test]
+    fn test_cli_parse_run_multiple_items() {
+        let cli = Cli::try_parse_from(["opz", "run", "foo", "bar", "--", "echo", "ok"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Run {
+                items,
+                command,
+                env_file,
+            }) => {
+                assert_eq!(items, vec!["foo".to_string(), "bar".to_string()]);
+                assert_eq!(command, vec!["echo".to_string(), "ok".to_string()]);
+                assert!(env_file.is_none());
+            }
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_run_with_env_file_option() {
+        let cli = Cli::try_parse_from([
+            "opz",
+            "run",
+            "--env-file",
+            ".env",
+            "foo",
+            "bar",
+            "--",
+            "env",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Some(Cmd::Run {
+                items, env_file, ..
+            }) => {
+                assert_eq!(items, vec!["foo".to_string(), "bar".to_string()]);
+                assert_eq!(env_file.as_deref(), Some(Path::new(".env")));
+            }
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_gen_multiple_items() {
+        let cli = Cli::try_parse_from(["opz", "gen", "foo", "bar"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Gen { items, env_file }) => {
+                assert_eq!(items, vec!["foo".to_string(), "bar".to_string()]);
+                assert!(env_file.is_none());
+            }
+            _ => panic!("expected gen command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_top_level_multiple_items() {
+        let cli = Cli::try_parse_from([
+            "opz",
+            "--env-file",
+            ".env.local",
+            "foo",
+            "bar",
+            "--",
+            "printenv",
+        ])
+        .unwrap();
+        assert!(cli.cmd.is_none());
+        assert_eq!(cli.items, vec!["foo".to_string(), "bar".to_string()]);
+        assert_eq!(cli.command, vec!["printenv".to_string()]);
+        assert_eq!(cli.env_file.as_deref(), Some(Path::new(".env.local")));
+    }
+
+    #[test]
+    fn test_cli_parse_legacy_env_positional_treated_as_item() {
+        let cli = Cli::try_parse_from(["opz", "run", "foo", ".env", "--", "env"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Run {
+                items, env_file, ..
+            }) => {
+                assert_eq!(items, vec!["foo".to_string(), ".env".to_string()]);
+                assert!(env_file.is_none());
+            }
+            _ => panic!("expected run command"),
+        }
     }
 }

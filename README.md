@@ -44,31 +44,35 @@ opz find <query>
 Run a command with secrets from a 1Password item as environment variables:
 
 ```bash
-opz [OPTIONS] <ITEM> [ENV] -- <COMMAND>...
+opz run [OPTIONS] [--env-file <ENV>] <ITEM>... -- <COMMAND>...
+opz [OPTIONS] [--env-file <ENV>] <ITEM>... -- <COMMAND>...
 ```
 
 Options:
 * `--vault <NAME>` - Vault name (optional, searches all vaults if omitted)
+* `--env-file <ENV>` - Output env file path (optional, no file generated if omitted)
 
 Arguments:
-* `<ITEM>` - Item title to fetch secrets from
-* `[ENV]` - Output env file path (optional, no file generated if omitted)
+* `<ITEM>...` - One or more item titles to fetch secrets from
 
-When `[ENV]` is specified, the env file is preserved after command execution. If the file already exists, new entries are appended and duplicate keys are overwritten.
+When `--env-file` is specified, the env file is preserved after command execution. If the file already exists, new entries are appended and duplicate keys are overwritten. If duplicate keys exist across items, later items win (`opz run foo bar ...` prefers `bar` values).
 
 Examples:
 ```bash
-# Run command with secrets from "example-item" item (no .env file generated)
-opz example-item -- your-command
+# Run command with one item (no .env file generated)
+opz run example-item -- your-command
+
+# Run command with multiple items (later items win on duplicate keys)
+opz run foo bar -- your-command
 
 # Run with secrets and generate .env file
-opz example-item .env -- your-command
+opz run --env-file .env foo bar -- your-command
 
-# Specify custom env file path
-opz example-item .env.local -- your-command
+# Top-level shorthand also supports multiple items
+opz --env-file .env.local foo bar -- your-command
 
 # Specify vault
-opz --vault Private example-item -- your-command
+opz run --vault Private foo bar -- your-command
 ```
 
 ### Generate Env File
@@ -76,23 +80,25 @@ opz --vault Private example-item -- your-command
 Generate env file only without running a command:
 
 ```bash
-opz gen <ITEM> [ENV]
+opz gen [OPTIONS] [--env-file <ENV>] <ITEM>...
 ```
 
 Examples:
 ```bash
-# Output env to stdout
-opz gen example-item
+# Output sectioned env references to stdout
+opz gen foo bar
 
 # Generate .env file
-opz gen example-item .env
+opz gen --env-file .env foo bar
 
 # Generate to custom path
-opz gen example-item .env.production
+opz gen --env-file .env.production foo bar
 
 # Specify vault
-opz --vault Private gen example-item
+opz --vault Private gen foo bar
 ```
+
+Stdout output includes per-item comment headers like `# --- item: <title> ---`; comments are ignored by `.env` parsers.
 
 ### Create Item from `.env` or Private Config
 
