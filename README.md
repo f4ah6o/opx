@@ -1,4 +1,9 @@
 # opz
+<!-- bdg:begin -->
+[![crates.io](https://img.shields.io/crates/v/opz.svg)](https://crates.io/crates/opz)
+[![license](https://img.shields.io/github/license/f4ah6o/opz.svg)](https://github.com/f4ah6o/opz)
+[![CI](https://github.com/f4ah6o/opz/actions/workflows/publish.yaml/badge.svg)](https://github.com/f4ah6o/opz/actions/workflows/publish.yaml)
+<!-- bdg:end -->
 
 1Password CLI wrapper for seamless secret injection into commands.
 
@@ -217,3 +222,5 @@ Or use just:
 ```bash
 just e2e
 ```
+
+
