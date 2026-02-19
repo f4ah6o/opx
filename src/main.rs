@@ -245,7 +245,9 @@ fn create_api_credential_item_from_env(cli: &Cli, item_title: &str, env_file: &P
     }
 
     let args = build_create_item_args(cli.vault.as_deref(), item_title, &env_pairs);
-    run_op_item_create(&args)
+    run_op_item_create(&args)?;
+    invalidate_item_list_cache_best_effort();
+    Ok(())
 }
 
 fn build_create_item_args(
@@ -292,6 +294,7 @@ fn create_secure_notes_from_file(cli: &Cli, file_path: &Path) -> Result<()> {
         run_op_item_create(&args)?;
     }
 
+    invalidate_item_list_cache_best_effort();
     Ok(())
 }
 
@@ -858,14 +861,48 @@ fn item_list_cached(vault: Option<&str>) -> Result<Vec<ItemListEntry>> {
     Ok(items)
 }
 
-fn cache_file_path(vault: Option<&str>) -> Result<PathBuf> {
+fn item_list_cache_dir() -> Result<PathBuf> {
     let proj = ProjectDirs::from("dev", "opz", "opz").ok_or_else(|| anyhow!("no cache dir"))?;
-    let base = proj.cache_dir().to_path_buf();
+    Ok(proj.cache_dir().to_path_buf())
+}
+
+fn cache_file_path(vault: Option<&str>) -> Result<PathBuf> {
+    let base = item_list_cache_dir()?;
     let key = vault.unwrap_or("_all_");
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
     let name = format!("item_list_{}.json", hex::encode(hasher.finalize()));
     Ok(base.join(name))
+}
+
+fn invalidate_item_list_cache() -> Result<()> {
+    let cache_dir = item_list_cache_dir()?;
+    if !cache_dir.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(&cache_dir).with_context(|| format!("read {}", cache_dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with("item_list_") && name.ends_with(".json") {
+            fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn invalidate_item_list_cache_best_effort() {
+    if let Err(err) = invalidate_item_list_cache() {
+        eprintln!("Warning: failed to invalidate item list cache: {err}");
+    }
 }
 
 fn item_get(item_id: &str) -> Result<ItemGet> {

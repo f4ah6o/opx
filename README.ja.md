@@ -179,3 +179,19 @@ sequenceDiagram
 ## 要件
 
 * [1Password CLI](https://developer.1password.com/docs/cli/) (`op`) がインストールされ、認証されていること
+
+## E2Eテスト
+
+実際の1Passwordを使うe2eテストは `tests/e2e_real_op.rs` にあります。
+
+安全のため、`OPZ_E2E=1` を指定した場合にのみ実行されます:
+
+```bash
+OPZ_E2E=1 cargo test --test e2e_real_op -- --nocapture
+```
+
+または `just` で実行できます:
+
+```bash
+just e2e
+```

@@ -179,3 +179,19 @@ sequenceDiagram
 ## Requirements
 
 * [1Password CLI](https://developer.1password.com/docs/cli/) (`op`) installed and authenticated
+
+## E2E Test
+
+Real 1Password e2e test is available in `tests/e2e_real_op.rs`.
+
+It is gated for safety and runs only when `OPZ_E2E=1` is set:
+
+```bash
+OPZ_E2E=1 cargo test --test e2e_real_op -- --nocapture
+```
+
+Or use just:
+
+```bash
+just e2e
+```
