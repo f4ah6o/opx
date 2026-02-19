@@ -5,6 +5,7 @@
 ## Features
 
 * Find items by keyword search
+* Show valid env labels from 1Password items with `show` subcommand
 * Run commands with secrets from 1Password items as environment variables
 * Generate env files with `gen` subcommand (appends to existing, overwrites duplicates)
 * Create 1Password items from `.env` files or private config files with `create` subcommand
@@ -37,6 +38,27 @@ Example:
 ```bash
 opz find <query>
 # Output: item-1	item-2	item-3
+```
+
+### Show Item Labels
+
+Show valid env labels from item fields:
+
+```bash
+opz show [OPTIONS] [--with-item] <ITEM>...
+```
+
+Options:
+* `--vault <NAME>` - Vault name (optional, searches all vaults if omitted)
+* `--with-item` - Show per-item headers
+
+Examples:
+```bash
+# Label names only (one per line)
+opz show foo bar
+
+# Include item header sections
+opz show --with-item foo bar
 ```
 
 ### Run Commands with Secrets
@@ -146,7 +168,7 @@ opz --vault Private create my-service .env
 4. If env file is specified, writes the file with references (appends to existing, overwrites duplicate keys); otherwise outputs to stdout
 5. Runs the command with secrets injected as environment variables
 
-With `gen` subcommand, only steps 1-4 are executed (no command run).
+With `gen` and `show` subcommands, only steps 1-4 are executed (no command run).
 
 ## `op` Command Usage
 

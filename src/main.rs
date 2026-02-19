@@ -42,6 +42,17 @@ enum Cmd {
     /// Find items by keyword (title contains)
     Find { query: String },
 
+    /// Show valid env labels from 1Password items
+    Show {
+        /// Show item title header for each section
+        #[arg(long)]
+        with_item: bool,
+
+        /// Item titles
+        #[arg(value_name = "ITEM", num_args = 1..)]
+        items: Vec<String>,
+    },
+
     /// Generate env file only (do not run command). Appends to existing file, overwrites duplicate keys.
     Gen {
         /// Output env file path (optional, no file generated if omitted)
@@ -125,6 +136,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Cmd::Show { with_item, items }) => show_item_labels(&cli, items, *with_item),
         Some(Cmd::Gen { items, env_file }) => generate_env_output(&cli, items, env_file.as_deref()),
         Some(Cmd::Create { item, source_file }) => {
             let env_path = source_file.as_deref().unwrap_or_else(|| Path::new(".env"));
@@ -167,6 +179,19 @@ fn collect_item_env_sections(cli: &Cli, items: &[String]) -> Result<Vec<(String,
         let item = item_get(&item_id)?;
         let env_lines = item_to_env_lines(&item, &vault_id, &item_id)?;
         sections.push((resolved_title, env_lines));
+    }
+
+    Ok(sections)
+}
+
+fn collect_item_label_sections(cli: &Cli, items: &[String]) -> Result<Vec<(String, Vec<String>)>> {
+    let mut sections = Vec::with_capacity(items.len());
+
+    for item_title in items {
+        let (item_id, _, resolved_title) = find_item(cli.vault.as_deref(), item_title)?;
+        let item = item_get(&item_id)?;
+        let labels = item_to_valid_labels(&item)?;
+        sections.push((resolved_title, labels));
     }
 
     Ok(sections)
@@ -217,6 +242,38 @@ fn sectioned_env_output_string(sections: &[(String, Vec<String>)]) -> String {
         out.push_str(&format!("# --- item: {} ---\n", title));
         for line in lines {
             out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn show_item_labels(cli: &Cli, items: &[String], with_item: bool) -> Result<()> {
+    let sections = collect_item_label_sections(cli, items)?;
+    print!("{}", show_output_string(&sections, with_item));
+    Ok(())
+}
+
+fn show_output_string(sections: &[(String, Vec<String>)], with_item: bool) -> String {
+    let mut out = String::new();
+
+    if with_item {
+        for (idx, (title, labels)) in sections.iter().enumerate() {
+            if idx > 0 {
+                out.push('\n');
+            }
+            out.push_str(&format!("# --- item: {} ---\n", title));
+            for label in labels {
+                out.push_str(label);
+                out.push('\n');
+            }
+        }
+        return out;
+    }
+
+    for (_, labels) in sections {
+        for label in labels {
+            out.push_str(label);
             out.push('\n');
         }
     }
@@ -723,6 +780,23 @@ fn item_to_env_lines(item: &ItemGet, vault_id: &str, item_id: &str) -> Result<Ve
     Ok(out)
 }
 
+fn item_to_valid_labels(item: &ItemGet) -> Result<Vec<String>> {
+    let re = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$")?;
+    let mut out = Vec::new();
+
+    for f in &item.fields {
+        let Some(label) = f.label.as_ref() else {
+            continue;
+        };
+        if !re.is_match(label) {
+            continue;
+        }
+        out.push(label.clone());
+    }
+
+    Ok(out)
+}
+
 /// Parse env line to extract key name (e.g., "KEY=value" -> "KEY")
 fn parse_env_key(line: &str) -> Option<&str> {
     let trimmed = line.trim();
@@ -943,6 +1017,10 @@ mod tests {
         item_to_env_lines(item, "vault-id", "abc123").unwrap()
     }
 
+    fn valid_labels(item: &ItemGet) -> Vec<String> {
+        item_to_valid_labels(item).unwrap()
+    }
+
     #[test]
     fn test_item_to_env_lines_basic() {
         let item = make_item(vec![
@@ -1007,6 +1085,17 @@ mod tests {
         let lines = env_lines(&item);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0], "HAS_VALUE=op://vault-id/abc123/HAS_VALUE");
+    }
+
+    #[test]
+    fn test_item_to_valid_labels_skips_invalid_and_missing() {
+        let item = make_item(vec![
+            make_field(Some("VALID_KEY"), false),
+            make_field(Some("invalid-key"), true),
+            make_field(None, true),
+        ]);
+        let labels = valid_labels(&item);
+        assert_eq!(labels, vec!["VALID_KEY".to_string()]);
     }
 
     #[test]
@@ -1638,6 +1727,58 @@ SINGLE='value # kept'
             rendered,
             "# --- item: foo ---\nA=op://v1/i1/A\nB=op://v1/i1/B\n\n# --- item: bar ---\nC=op://v2/i2/C\n"
         );
+    }
+
+    #[test]
+    fn test_show_output_string_plain() {
+        let sections = vec![
+            (
+                "foo".to_string(),
+                vec!["A".to_string(), "B".to_string()],
+            ),
+            ("bar".to_string(), vec!["C".to_string()]),
+        ];
+
+        let rendered = show_output_string(&sections, false);
+        assert_eq!(rendered, "A\nB\nC\n");
+    }
+
+    #[test]
+    fn test_show_output_string_with_item() {
+        let sections = vec![
+            (
+                "foo".to_string(),
+                vec!["A".to_string(), "B".to_string()],
+            ),
+            ("bar".to_string(), vec!["C".to_string()]),
+        ];
+
+        let rendered = show_output_string(&sections, true);
+        assert_eq!(rendered, "# --- item: foo ---\nA\nB\n\n# --- item: bar ---\nC\n");
+    }
+
+    #[test]
+    fn test_cli_parse_show_multiple_items() {
+        let cli = Cli::try_parse_from(["opz", "show", "foo", "bar"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Show { with_item, items }) => {
+                assert!(!with_item);
+                assert_eq!(items, vec!["foo".to_string(), "bar".to_string()]);
+            }
+            _ => panic!("expected show command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_show_with_item_flag() {
+        let cli = Cli::try_parse_from(["opz", "show", "--with-item", "foo"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Show { with_item, items }) => {
+                assert!(with_item);
+                assert_eq!(items, vec!["foo".to_string()]);
+            }
+            _ => panic!("expected show command"),
+        }
     }
 
     #[test]

@@ -5,6 +5,7 @@
 ## 機能
 
 * キーワード検索でアイテムを検索
+* `show` サブコマンドでアイテムの env 有効ラベル名を表示
 * 1Password アイテムの secret を環境変数としてコマンド実行
 * `gen` サブコマンドで env ファイル生成（既存ファイルに追記、重複キーは上書き）
 * `create` サブコマンドで `.env` または private 設定ファイルからアイテムを作成
@@ -37,6 +38,27 @@ opz find <query>
 ```bash
 opz find baz
 # 出力: foo   bar     baz
+```
+
+### アイテムラベル表示
+
+アイテムのフィールドから env 変数として有効なラベル名を表示:
+
+```bash
+opz show [OPTIONS] [--with-item] <ITEM>...
+```
+
+オプション:
+* `--vault <NAME>` - Vault 名（省略時はすべての Vault を検索）
+* `--with-item` - アイテムごとの見出しを表示
+
+例:
+```bash
+# ラベル名のみ（1行1ラベル）
+opz show foo bar
+
+# アイテム見出し付きで表示
+opz show --with-item foo bar
 ```
 
 ### Secret 付きでコマンド実行
@@ -146,7 +168,7 @@ opz --vault Private create my-service .env
 4. env ファイルパスが指定されている場合はファイルに書き込み（既存ファイルにマージ、重複キーは上書き）；指定がない場合は標準出力に出力
 5. 環境変数として secret を注入してコマンドを実行
 
-`gen` サブコマンドの場合、ステップ 1-4 のみ実行されます（コマンド実行なし）。
+`gen` と `show` サブコマンドの場合、ステップ 1-4 のみ実行されます（コマンド実行なし）。
 
 ## `op` コマンドの利用
 
