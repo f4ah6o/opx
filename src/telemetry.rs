@@ -4,6 +4,7 @@ use opentelemetry_sdk::{
     trace::{Sampler, SdkTracerProvider},
     Resource,
 };
+use std::process::Command;
 
 pub struct TelemetryHandle {
     provider: Option<SdkTracerProvider>,
@@ -30,6 +31,7 @@ pub fn init(command_hint: &str, service_version: &str) -> TelemetryHandle {
 
     let service_name =
         std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| env!("CARGO_PKG_NAME").to_string());
+    let git_commit = resolve_git_commit();
     let sampler = sampler_from_env();
 
     let exporter = match opentelemetry_otlp::SpanExporter::builder()
@@ -53,6 +55,7 @@ pub fn init(command_hint: &str, service_version: &str) -> TelemetryHandle {
             "service.version",
             service_version.to_string(),
         ))
+        .with_attribute(KeyValue::new("git.commit", git_commit))
         .build();
 
     let provider = SdkTracerProvider::builder()
@@ -65,6 +68,31 @@ pub fn init(command_hint: &str, service_version: &str) -> TelemetryHandle {
 
     TelemetryHandle {
         provider: Some(provider),
+    }
+}
+
+fn resolve_git_commit() -> String {
+    if let Ok(v) = std::env::var("OPZ_GIT_COMMIT") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let out = Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .output();
+
+    match out {
+        Ok(output) if output.status.success() => {
+            let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if commit.is_empty() {
+                "unknown".to_string()
+            } else {
+                commit
+            }
+        }
+        _ => "unknown".to_string(),
     }
 }
 

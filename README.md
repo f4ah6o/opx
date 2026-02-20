@@ -225,7 +225,20 @@ just e2e-trace
 just trace-ui
 ```
 
-In Jaeger Search, select service `opz-e2e`.
+In Jaeger Search, select service `opz-e2e`.  
+`just e2e-trace` automatically sets `OPZ_GIT_COMMIT=$(git rev-parse --short=12 HEAD)`.
+
+### Compare traces by ref or version
+
+Generate traces on each target commit/tag (or release version), then compare:
+
+```bash
+just trace-report <ref-or-version>
+just trace-compare <base-ref-or-version> <head-ref-or-version>
+```
+
+`<ref-or-version>` accepts commit hash, git tag (for example `v2026.2.5`), or `service.version` (for example `2026.2.5`).
+Both commands print markdown tables (duration and top child span) for easy copy into PRs.
 
 Then open Jaeger Search and select service `opz` (or your `OTEL_SERVICE_NAME`) to inspect spans such as:
 
@@ -243,6 +256,7 @@ Then open Jaeger Search and select service `opz` (or your `OTEL_SERVICE_NAME`) t
 * `OTEL_TRACES_SAMPLER` - Optional sampler setting (`always_on`, `traceidratio`, etc.)
 * `OTEL_TRACES_SAMPLER_ARG` - Optional sampler parameter (for ratio-based samplers)
 * `OPZ_TRACE_CAPTURE_ARGS` - `1` to include sanitized `cli.args` in trace attributes (default: disabled)
+* `OPZ_GIT_COMMIT` - Optional override for trace resource attribute `git.commit` (default: `git rev-parse --short=12 HEAD`)
 
 ## Requirements
 

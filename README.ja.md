@@ -220,7 +220,20 @@ just e2e-trace
 just trace-ui
 ```
 
-Jaeger の Search で service `opz-e2e` を選択してください。
+Jaeger の Search で service `opz-e2e` を選択してください。  
+`just e2e-trace` は `OPZ_GIT_COMMIT=$(git rev-parse --short=12 HEAD)` を自動設定します。
+
+### ref / version 単位で trace を比較する
+
+比較したい各 commit / tag / version で trace を生成した後、次を実行します:
+
+```bash
+just trace-report <ref-or-version>
+just trace-compare <base-ref-or-version> <head-ref-or-version>
+```
+
+`<ref-or-version>` には commit hash、git tag（例: `v2026.2.5`）、`service.version`（例: `2026.2.5`）を指定できます。
+どちらも markdown テーブル（duration と最長 child span）を標準出力します。
 
 Jaeger の Search で service `opz`（または `OTEL_SERVICE_NAME`）を選び、以下の span を確認できます:
 
@@ -238,6 +251,7 @@ Jaeger の Search で service `opz`（または `OTEL_SERVICE_NAME`）を選び�
 * `OTEL_TRACES_SAMPLER` - sampler 設定（`always_on`, `traceidratio` など）
 * `OTEL_TRACES_SAMPLER_ARG` - ratio sampler 用パラメータ
 * `OPZ_TRACE_CAPTURE_ARGS` - `1` のときのみサニタイズ済み `cli.args` を属性記録（デフォルト: 無効）
+* `OPZ_GIT_COMMIT` - trace の resource 属性 `git.commit` の任意上書き（デフォルト: `git rev-parse --short=12 HEAD`）
 
 ## 要件
 

@@ -6,6 +6,7 @@ use opentelemetry::{
 };
 use regex::Regex;
 use std::ffi::OsString;
+use std::process::Command;
 use std::sync::OnceLock;
 
 const TRACE_TEXT_LIMIT: usize = 512;
@@ -51,6 +52,7 @@ pub fn build_cli_trace_attrs(command_name: &str, args: &[OsString]) -> Vec<KeyVa
     let mut attrs = vec![
         KeyValue::new("cli.command", command_name.to_string()),
         KeyValue::new("cli.args_count", (args.len().saturating_sub(1)) as i64),
+        KeyValue::new("git.commit", resolve_git_commit_attr()),
     ];
 
     if let Ok(cwd) = std::env::current_dir() {
@@ -68,6 +70,30 @@ pub fn build_cli_trace_attrs(command_name: &str, args: &[OsString]) -> Vec<KeyVa
     }
 
     attrs
+}
+
+fn resolve_git_commit_attr() -> String {
+    if let Ok(v) = std::env::var("OPZ_GIT_COMMIT") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let out = Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .output();
+    match out {
+        Ok(output) if output.status.success() => {
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if value.is_empty() {
+                "unknown".to_string()
+            } else {
+                value
+            }
+        }
+        _ => "unknown".to_string(),
+    }
 }
 
 pub fn sanitize_for_trace(input: &str) -> String {
