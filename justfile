@@ -12,3 +12,21 @@ release: release-check
 
 e2e:
     OPZ_E2E=1 cargo test --test e2e_real_op -- --nocapture
+
+e2e-trace:
+    OTEL_SERVICE_NAME=opz-e2e OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 OPZ_E2E=1 cargo test --test e2e_real_op -- --nocapture
+
+jaeger-up:
+    docker compose up -d
+
+jaeger-down:
+    docker compose down
+
+trace-find query='example':
+    OTEL_SERVICE_NAME=opz OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 cargo run -- find {{query}}
+
+trace-run item='example-item':
+    OTEL_SERVICE_NAME=opz OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 cargo run -- run {{item}} -- env
+
+trace-ui:
+    (open http://localhost:16686 || xdg-open http://localhost:16686 || echo "Open http://localhost:16686 in your browser")

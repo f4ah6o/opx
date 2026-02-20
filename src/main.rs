@@ -1,11 +1,16 @@
+mod telemetry;
+mod telemetry_span;
+
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
+use opentelemetry::KeyValue;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    ffi::OsString,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -121,19 +126,87 @@ struct ItemField {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    if std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_some() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .context("failed to start Tokio runtime for OTLP gRPC exporter")?;
+        return runtime.block_on(async { run_main() });
+    }
+
+    run_main()
+}
+
+fn run_main() -> Result<()> {
+    let args: Vec<OsString> = std::env::args_os().collect();
+    let command_hint = detect_command_hint(&args).to_string();
+    let telemetry = telemetry::init(&command_hint, env!("CARGO_PKG_VERSION"));
+
+    let result = telemetry_span::with_span(
+        &format!("cli.{command_hint}"),
+        telemetry_span::build_cli_trace_attrs(&command_hint, &args),
+        || {
+            let result = run_cli(&args);
+            if let Err(err) = &result {
+                if !is_clap_display_error(err) {
+                    telemetry_span::record_error_message(&err.to_string());
+                }
+            }
+            result
+        },
+    );
+
+    telemetry.shutdown_best_effort();
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if let Some(clap_err) = err.downcast_ref::<clap::Error>() {
+                let _ = clap_err.print();
+                std::process::exit(clap_err.exit_code());
+            }
+            Err(err)
+        }
+    }
+}
+
+fn run_cli(args: &[OsString]) -> Result<()> {
+    let cli = telemetry_span::with_span("parse_args", vec![], || {
+        let parse_result = Cli::try_parse_from(args);
+        if let Err(err) = &parse_result {
+            if err.exit_code() != 0 {
+                telemetry_span::record_error_message(&err.to_string());
+            }
+        }
+        parse_result
+    })?;
+    telemetry_span::with_span("load_config", vec![], || {
+        let _ = std::env::current_dir();
+        let _ = std::env::var_os("OPZ_TRACE_CAPTURE_ARGS");
+    });
 
     match &cli.cmd {
         Some(Cmd::Find { query }) => {
-            let items = item_list_cached(cli.vault.as_deref())?;
+            let items = telemetry_span::with_span_result("load_inputs", vec![], || {
+                item_list_cached(cli.vault.as_deref())
+            })?;
             let q = query.to_lowercase();
-            for it in items
-                .into_iter()
-                .filter(|x| x.title.to_lowercase().contains(&q))
-            {
-                let vault = it.vault.as_ref().map(|v| v.name.as_str()).unwrap_or("-");
-                println!("{}\t{}\t{}", it.id, vault, it.title);
-            }
+            let rows = telemetry_span::with_span("main_operation", vec![], || {
+                items
+                    .into_iter()
+                    .filter(|x| x.title.to_lowercase().contains(&q))
+                    .map(|it| {
+                        let vault = it.vault.as_ref().map(|v| v.name.as_str()).unwrap_or("-");
+                        format!("{}\t{}\t{}", it.id, vault, it.title)
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+            telemetry_span::with_span("write_outputs", vec![], || {
+                for row in &rows {
+                    println!("{row}");
+                }
+            });
             Ok(())
         }
         Some(Cmd::Show { with_item, items }) => show_item_labels(&cli, items, *with_item),
@@ -171,12 +244,58 @@ fn main() -> Result<()> {
     }
 }
 
+fn is_clap_display_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<clap::Error>()
+        .is_some_and(|clap_err| clap_err.exit_code() == 0)
+}
+
+fn detect_command_hint(args: &[OsString]) -> &'static str {
+    let mut idx = 1;
+    while idx < args.len() {
+        let arg = args[idx].to_string_lossy();
+
+        if arg == "--" {
+            return "run";
+        }
+        if arg == "--help" || arg == "-h" {
+            return "help";
+        }
+        if arg == "--version" || arg == "-V" {
+            return "version";
+        }
+
+        if arg == "--vault" || arg == "--env-file" {
+            idx += 2;
+            continue;
+        }
+        if arg.starts_with("--vault=") || arg.starts_with("--env-file=") {
+            idx += 1;
+            continue;
+        }
+        if arg.starts_with("--") {
+            idx += 1;
+            continue;
+        }
+
+        return match arg.as_ref() {
+            "find" => "find",
+            "show" => "show",
+            "gen" => "gen",
+            "create" => "create",
+            "run" => "run",
+            _ => "run",
+        };
+    }
+
+    "run"
+}
+
 fn collect_item_env_sections(cli: &Cli, items: &[String]) -> Result<Vec<(String, Vec<String>)>> {
     let mut sections = Vec::with_capacity(items.len());
 
     for item_title in items {
-        let (item_id, vault_id, resolved_title) = find_item(cli.vault.as_deref(), item_title)?;
-        let item = item_get(&item_id)?;
+        let (item_id, vault_id, resolved_title, item) =
+            find_item(cli.vault.as_deref(), item_title)?;
         let env_lines = item_to_env_lines(&item, &vault_id, &item_id)?;
         sections.push((resolved_title, env_lines));
     }
@@ -188,8 +307,7 @@ fn collect_item_label_sections(cli: &Cli, items: &[String]) -> Result<Vec<(Strin
     let mut sections = Vec::with_capacity(items.len());
 
     for item_title in items {
-        let (item_id, _, resolved_title) = find_item(cli.vault.as_deref(), item_title)?;
-        let item = item_get(&item_id)?;
+        let (_, _, resolved_title, item) = find_item(cli.vault.as_deref(), item_title)?;
         let labels = item_to_valid_labels(&item)?;
         sections.push((resolved_title, labels));
     }
@@ -218,7 +336,22 @@ fn merge_env_lines(sections: &[(String, Vec<String>)]) -> Vec<String> {
 }
 
 fn resolve_env_vars(env_lines: &[String]) -> Result<HashMap<String, String>> {
-    let mut env_vars: HashMap<String, String> = HashMap::new();
+    let references: Vec<(String, String)> = env_lines
+        .iter()
+        .filter_map(|line| {
+            parse_env_line_kv(line).map(|(key, reference)| (key.to_string(), reference.to_string()))
+        })
+        .collect();
+    if references.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    if let Ok(env_vars) = resolve_env_vars_batch(&references) {
+        return Ok(env_vars);
+    }
+
+    // Fallback path for environments where batch resolution is unavailable.
+    let mut env_vars: HashMap<String, String> = HashMap::with_capacity(references.len());
     for line in env_lines {
         if let Some((key, reference)) = parse_env_line_kv(line) {
             let value = op_read(reference)?;
@@ -227,6 +360,67 @@ fn resolve_env_vars(env_lines: &[String]) -> Result<HashMap<String, String>> {
     }
 
     Ok(env_vars)
+}
+
+fn resolve_env_vars_batch(references: &[(String, String)]) -> Result<HashMap<String, String>> {
+    telemetry_span::with_span_result(
+        "load_inputs.op_run_batch_resolve",
+        vec![KeyValue::new(
+            "env.reference_count",
+            references.len() as i64,
+        )],
+        || {
+            let mut temp_env = tempfile::NamedTempFile::new().context("create temp env file")?;
+            for (key, reference) in references {
+                writeln!(temp_env, "{key}={reference}")?;
+            }
+
+            let out = Command::new("op")
+                .arg("run")
+                .arg("--no-masking")
+                .arg("--env-file")
+                .arg(temp_env.path())
+                .arg("--")
+                .arg("sh")
+                .arg("-c")
+                .arg("env -0")
+                .output()
+                .context("failed to run `op run` for batch secret resolution")?;
+
+            if !out.status.success() {
+                return Err(anyhow!(
+                    "op run failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+
+            let wanted_keys: std::collections::HashSet<&str> =
+                references.iter().map(|(key, _)| key.as_str()).collect();
+            let mut env_vars = HashMap::with_capacity(references.len());
+            for record in out.stdout.split(|b| *b == b'\0') {
+                if record.is_empty() {
+                    continue;
+                }
+                let kv = String::from_utf8_lossy(record);
+                let Some((key, value)) = kv.split_once('=') else {
+                    continue;
+                };
+                if wanted_keys.contains(key) {
+                    env_vars.insert(key.to_string(), value.to_string());
+                }
+            }
+
+            if env_vars.len() != references.len() {
+                return Err(anyhow!(
+                    "batch resolution was incomplete ({}/{})",
+                    env_vars.len(),
+                    references.len()
+                ));
+            }
+
+            Ok(env_vars)
+        },
+    )
 }
 
 fn print_sectioned_env_output(sections: &[(String, Vec<String>)]) {
@@ -249,8 +443,17 @@ fn sectioned_env_output_string(sections: &[(String, Vec<String>)]) -> String {
 }
 
 fn show_item_labels(cli: &Cli, items: &[String], with_item: bool) -> Result<()> {
-    let sections = collect_item_label_sections(cli, items)?;
-    print!("{}", show_output_string(&sections, with_item));
+    let sections = telemetry_span::with_span_result(
+        "load_inputs",
+        vec![KeyValue::new("item.count", items.len() as i64)],
+        || collect_item_label_sections(cli, items),
+    )?;
+    let rendered = telemetry_span::with_span("main_operation", vec![], || {
+        show_output_string(&sections, with_item)
+    });
+    telemetry_span::with_span("write_outputs", vec![], || {
+        print!("{rendered}");
+    });
     Ok(())
 }
 
@@ -282,10 +485,24 @@ fn show_output_string(sections: &[(String, Vec<String>)], with_item: bool) -> St
 
 fn create_item_from_env(cli: &Cli, item_title: &str, env_file: &Path) -> Result<()> {
     if !is_exact_dotenv(env_file) {
-        return create_secure_notes_from_file(cli, env_file);
+        return telemetry_span::with_span_result(
+            "main_operation",
+            vec![
+                KeyValue::new("cli.input_path", env_file.display().to_string()),
+                KeyValue::new("item.title", item_title.to_string()),
+            ],
+            || create_secure_notes_from_file(cli, env_file),
+        );
     }
 
-    create_api_credential_item_from_env(cli, item_title, env_file)
+    telemetry_span::with_span_result(
+        "main_operation",
+        vec![
+            KeyValue::new("cli.input_path", env_file.display().to_string()),
+            KeyValue::new("item.title", item_title.to_string()),
+        ],
+        || create_api_credential_item_from_env(cli, item_title, env_file),
+    )
 }
 
 fn is_exact_dotenv(path: &Path) -> bool {
@@ -293,7 +510,14 @@ fn is_exact_dotenv(path: &Path) -> bool {
 }
 
 fn create_api_credential_item_from_env(cli: &Cli, item_title: &str, env_file: &Path) -> Result<()> {
-    let env_pairs = parse_env_file(env_file)?;
+    let env_pairs = telemetry_span::with_span_result(
+        "load_inputs",
+        vec![KeyValue::new(
+            "cli.input_path",
+            env_file.display().to_string(),
+        )],
+        || parse_env_file(env_file),
+    )?;
     if env_pairs.is_empty() {
         return Err(anyhow!(
             "No valid env entries found in {}",
@@ -301,10 +525,14 @@ fn create_api_credential_item_from_env(cli: &Cli, item_title: &str, env_file: &P
         ));
     }
 
-    let args = build_create_item_args(cli.vault.as_deref(), item_title, &env_pairs);
-    run_op_item_create(&args)?;
-    invalidate_item_list_cache_best_effort();
-    Ok(())
+    let args = telemetry_span::with_span("main_operation", vec![], || {
+        build_create_item_args(cli.vault.as_deref(), item_title, &env_pairs)
+    });
+    telemetry_span::with_span_result("write_outputs", vec![], || {
+        run_op_item_create(&args)?;
+        invalidate_item_list_cache_best_effort();
+        Ok(())
+    })
 }
 
 fn build_create_item_args(
@@ -335,24 +563,37 @@ fn build_create_item_args(
 }
 
 fn create_secure_notes_from_file(cli: &Cli, file_path: &Path) -> Result<()> {
-    let content =
-        fs::read_to_string(file_path).with_context(|| format!("read {}", file_path.display()))?;
-    let file_name = file_path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .ok_or_else(|| anyhow!("invalid file path: {}", file_path.display()))?;
-    let body = build_secure_note_body(&file_name, &content);
+    let (file_name, content, remote_repo_names) = telemetry_span::with_span_result(
+        "load_inputs",
+        vec![KeyValue::new(
+            "cli.input_path",
+            file_path.display().to_string(),
+        )],
+        || {
+            let content = fs::read_to_string(file_path)
+                .with_context(|| format!("read {}", file_path.display()))?;
+            let file_name = file_path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .ok_or_else(|| anyhow!("invalid file path: {}", file_path.display()))?;
+            let remote_repo_names = list_remote_repo_names()?;
+            Ok((file_name, content, remote_repo_names))
+        },
+    )?;
+    let (body, item_titles) = telemetry_span::with_span("main_operation", vec![], || {
+        let body = build_secure_note_body(&file_name, &content);
+        let item_titles = dedupe_titles_with_sequence(&remote_repo_names);
+        (body, item_titles)
+    });
 
-    let remote_repo_names = list_remote_repo_names()?;
-    let item_titles = dedupe_titles_with_sequence(&remote_repo_names);
-
-    for item_title in item_titles {
-        let args = build_create_secure_note_args(cli.vault.as_deref(), &item_title, &body);
-        run_op_item_create(&args)?;
-    }
-
-    invalidate_item_list_cache_best_effort();
-    Ok(())
+    telemetry_span::with_span_result("write_outputs", vec![], || {
+        for item_title in item_titles {
+            let args = build_create_secure_note_args(cli.vault.as_deref(), &item_title, &body);
+            run_op_item_create(&args)?;
+        }
+        invalidate_item_list_cache_best_effort();
+        Ok(())
+    })
 }
 
 fn build_secure_note_body(file_name: &str, content: &str) -> String {
@@ -385,21 +626,27 @@ fn build_create_secure_note_args(vault: Option<&str>, item_title: &str, body: &s
 }
 
 fn run_op_item_create(args: &[String]) -> Result<()> {
-    let mut cmd = Command::new("op");
-    cmd.args(args);
+    telemetry_span::with_span_result(
+        "write_outputs.op_item_create",
+        vec![KeyValue::new("op.arg_count", args.len() as i64)],
+        || {
+            let mut cmd = Command::new("op");
+            cmd.args(args);
 
-    let status = cmd
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("failed to run `op item create`")?;
+            let status = cmd
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .context("failed to run `op item create`")?;
 
-    if !status.success() {
-        return Err(anyhow!("op item create failed with status: {}", status));
-    }
+            if !status.success() {
+                return Err(anyhow!("op item create failed with status: {}", status));
+            }
 
-    Ok(())
+            Ok(())
+        },
+    )
 }
 
 fn list_remote_repo_names() -> Result<Vec<String>> {
@@ -591,7 +838,7 @@ fn is_op_reference(value: &str) -> bool {
 }
 
 /// Find and match item by title, returns (item_id, vault_id, item_title)
-fn find_item(vault: Option<&str>, item_title: &str) -> Result<(String, String, String)> {
+fn find_item(vault: Option<&str>, item_title: &str) -> Result<(String, String, String, ItemGet)> {
     let items = item_list_cached(vault)?;
 
     let mut matches: Vec<ItemListEntry> = items
@@ -630,7 +877,7 @@ fn find_item(vault: Option<&str>, item_title: &str) -> Result<(String, String, S
     )
     .ok_or_else(|| anyhow!("Vault ID is required. Try specifying --vault."))?;
 
-    Ok((item_id, vault_id, matches[0].title.clone()))
+    Ok((item_id, vault_id, matches[0].title.clone(), item))
 }
 
 fn resolve_vault_id(
@@ -641,16 +888,42 @@ fn resolve_vault_id(
 }
 
 fn generate_env_output(cli: &Cli, items: &[String], env_file: Option<&Path>) -> Result<()> {
-    let sections = collect_item_env_sections(cli, items)?;
-    let merged_env_lines = merge_env_lines(&sections);
+    let sections = telemetry_span::with_span_result(
+        "load_inputs",
+        vec![KeyValue::new("item.count", items.len() as i64)],
+        || collect_item_env_sections(cli, items),
+    )?;
+    let merged_env_lines =
+        telemetry_span::with_span("main_operation", vec![], || merge_env_lines(&sections));
 
-    if let Some(path) = env_file {
-        write_env_file(path, &merged_env_lines)?;
-        eprintln!("Generated: {}", path.display());
-    } else {
-        print_sectioned_env_output(&sections);
-    }
-    Ok(())
+    telemetry_span::with_span_result(
+        "write_outputs",
+        vec![
+            KeyValue::new(
+                "cli.output_mode",
+                if env_file.is_some() {
+                    "file".to_string()
+                } else {
+                    "stdout".to_string()
+                },
+            ),
+            KeyValue::new(
+                "cli.output_path",
+                env_file
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+        ],
+        || {
+            if let Some(path) = env_file {
+                write_env_file(path, &merged_env_lines)?;
+                eprintln!("Generated: {}", path.display());
+            } else {
+                print_sectioned_env_output(&sections);
+            }
+            Ok(())
+        },
+    )
 }
 
 /// Expand $VAR and ${VAR} references in a string using provided environment variables.
@@ -715,45 +988,71 @@ fn run_with_items(
     env_file: Option<&Path>,
     command: &[String],
 ) -> Result<()> {
-    let sections = collect_item_env_sections(cli, items)?;
-    let merged_env_lines = merge_env_lines(&sections);
+    let sections = telemetry_span::with_span_result(
+        "load_inputs",
+        vec![KeyValue::new("item.count", items.len() as i64)],
+        || collect_item_env_sections(cli, items),
+    )?;
+    let merged_env_lines =
+        telemetry_span::with_span("main_operation", vec![], || merge_env_lines(&sections));
 
-    if let Some(path) = env_file {
-        write_env_file(path, &merged_env_lines)?;
-        eprintln!("Generated: {}", path.display());
-    }
+    telemetry_span::with_span_result(
+        "write_outputs",
+        vec![
+            KeyValue::new(
+                "cli.output_path",
+                env_file
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+            KeyValue::new("cli.command_arg_count", command.len() as i64),
+        ],
+        || {
+            if let Some(path) = env_file {
+                write_env_file(path, &merged_env_lines)?;
+                eprintln!("Generated: {}", path.display());
+            }
+            Ok(())
+        },
+    )?;
 
     // First pass: collect all environment variable values
-    let env_vars = resolve_env_vars(&merged_env_lines)?;
+    let env_vars = telemetry_span::with_span_result("load_inputs", vec![], || {
+        resolve_env_vars(&merged_env_lines)
+    })?;
 
     // Second pass: expand $VAR references in command arguments
-    let expanded_args: Vec<String> = command
-        .iter()
-        .map(|arg| expand_vars(arg, &env_vars))
-        .collect();
+    let expanded_args: Vec<String> = telemetry_span::with_span("main_operation", vec![], || {
+        command
+            .iter()
+            .map(|arg| expand_vars(arg, &env_vars))
+            .collect()
+    });
 
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c");
-    cmd.arg("exec \"$@\"");
-    cmd.arg("sh");
-    cmd.args(&expanded_args);
+    telemetry_span::with_span_result("write_outputs.command_exec", vec![], || {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c");
+        cmd.arg("exec \"$@\"");
+        cmd.arg("sh");
+        cmd.args(&expanded_args);
 
-    // Set environment variables for the child process
-    for (key, value) in &env_vars {
-        cmd.env(key, value);
-    }
+        // Set environment variables for the child process
+        for (key, value) in &env_vars {
+            cmd.env(key, value);
+        }
 
-    let status = cmd
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("failed to run command")?;
+        let status = cmd
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("failed to run command")?;
 
-    if !status.success() {
-        return Err(anyhow!("command failed with status: {}", status));
-    }
-    Ok(())
+        if !status.success() {
+            return Err(anyhow!("command failed with status: {}", status));
+        }
+        Ok(())
+    })
 }
 
 fn item_to_env_lines(item: &ItemGet, vault_id: &str, item_id: &str) -> Result<Vec<String>> {
@@ -820,119 +1119,168 @@ fn parse_env_line_kv(line: &str) -> Option<(&str, &str)> {
 
 /// Read a secret from 1Password using op read
 fn op_read(reference: &str) -> Result<String> {
-    let out = Command::new("op")
-        .arg("read")
-        .arg(reference)
-        .output()
-        .context("failed to run `op read`")?;
+    telemetry_span::with_span_result("load_inputs.op_read", vec![], || {
+        let out = Command::new("op")
+            .arg("read")
+            .arg(reference)
+            .output()
+            .context("failed to run `op read`")?;
 
-    if !out.status.success() {
-        return Err(anyhow!(
-            "op read failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
+        if !out.status.success() {
+            return Err(anyhow!(
+                "op read failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
 
-    Ok(String::from_utf8(out.stdout)?.trim().to_string())
+        Ok(String::from_utf8(out.stdout)?.trim().to_string())
+    })
 }
 
 fn write_env_file(path: &Path, new_lines: &[String]) -> Result<()> {
-    use std::collections::HashMap;
+    telemetry_span::with_span_result(
+        "write_outputs.write_env_file",
+        vec![
+            KeyValue::new("cli.output_path", path.display().to_string()),
+            KeyValue::new("env.line_count", new_lines.len() as i64),
+        ],
+        || {
+            use std::collections::HashMap;
 
-    // Build a map of new keys for quick lookup
-    let new_keys: HashMap<String, &str> = new_lines
-        .iter()
-        .filter_map(|line| parse_env_key(line).map(|key| (key.to_string(), line.as_str())))
-        .collect();
+            // Build a map of new keys for quick lookup
+            let new_keys: HashMap<String, &str> = new_lines
+                .iter()
+                .filter_map(|line| parse_env_key(line).map(|key| (key.to_string(), line.as_str())))
+                .collect();
 
-    let mut result_lines: Vec<String> = Vec::new();
-    let mut written_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut result_lines: Vec<String> = Vec::new();
+            let mut written_keys: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
 
-    // Read existing file and merge
-    if path.exists() {
-        let content =
-            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+            // Read existing file and merge
+            if path.exists() {
+                let content =
+                    fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
 
-        for line in content.lines() {
-            if let Some(key) = parse_env_key(line) {
-                if let Some(&new_line) = new_keys.get(key) {
-                    // Overwrite with new value
-                    result_lines.push(new_line.to_string());
-                    written_keys.insert(key.to_string());
-                } else {
-                    // Keep existing line
-                    result_lines.push(line.to_string());
+                for line in content.lines() {
+                    if let Some(key) = parse_env_key(line) {
+                        if let Some(&new_line) = new_keys.get(key) {
+                            // Overwrite with new value
+                            result_lines.push(new_line.to_string());
+                            written_keys.insert(key.to_string());
+                        } else {
+                            // Keep existing line
+                            result_lines.push(line.to_string());
+                        }
+                    } else {
+                        // Comment or empty line - keep as is
+                        result_lines.push(line.to_string());
+                    }
                 }
-            } else {
-                // Comment or empty line - keep as is
-                result_lines.push(line.to_string());
             }
-        }
-    }
 
-    // Append new keys that weren't already in the file
-    for line in new_lines {
-        if let Some(key) = parse_env_key(line) {
-            if !written_keys.contains(key) {
-                result_lines.push(line.clone());
+            // Append new keys that weren't already in the file
+            for line in new_lines {
+                if let Some(key) = parse_env_key(line) {
+                    if !written_keys.contains(key) {
+                        result_lines.push(line.clone());
+                    }
+                }
             }
-        }
-    }
 
-    // Write result
-    let mut f = fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
-    for line in &result_lines {
-        writeln!(f, "{line}")?;
-    }
-    Ok(())
+            // Write result
+            let mut f =
+                fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
+            for line in &result_lines {
+                writeln!(f, "{line}")?;
+            }
+            Ok(())
+        },
+    )
 }
 
 fn op_json(args: &[&str]) -> Result<serde_json::Value> {
-    let out = Command::new("op")
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run op {}", args.join(" ")))?;
+    let operation = args.iter().take(2).copied().collect::<Vec<_>>().join(" ");
+    telemetry_span::with_span_result(
+        "load_inputs.op_json",
+        vec![KeyValue::new("op.operation", operation)],
+        || {
+            let out = Command::new("op")
+                .args(args)
+                .output()
+                .with_context(|| format!("failed to run op {}", args.join(" ")))?;
 
-    if !out.status.success() {
-        return Err(anyhow!(
-            "op error ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
+            if !out.status.success() {
+                return Err(anyhow!(
+                    "op error ({}): {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
 
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).context("failed to parse op JSON output")?;
-    Ok(v)
+            let v: serde_json::Value =
+                serde_json::from_slice(&out.stdout).context("failed to parse op JSON output")?;
+            Ok(v)
+        },
+    )
 }
 
 /// Cache `op item list --format json` to speed up repeated runs.
 fn item_list_cached(vault: Option<&str>) -> Result<Vec<ItemListEntry>> {
-    let cache_path = cache_file_path(vault)?;
-    let ttl = Duration::from_secs(60); // 60秒程度で十分（好みで調整）
+    telemetry_span::with_span_result(
+        "load_inputs.item_list_cached",
+        vec![KeyValue::new("vault.specified", vault.is_some())],
+        || {
+            let cache_path = cache_file_path(vault)?;
+            let ttl = Duration::from_secs(60); // 60秒程度で十分（好みで調整）
 
-    if let Ok(meta) = fs::metadata(&cache_path) {
-        if let Ok(mtime) = meta.modified() {
-            if SystemTime::now().duration_since(mtime).unwrap_or_default() < ttl {
-                let bytes = fs::read(&cache_path)?;
-                let items: Vec<ItemListEntry> = serde_json::from_slice(&bytes)?;
-                return Ok(items);
+            if let Ok(meta) = fs::metadata(&cache_path) {
+                if let Ok(mtime) = meta.modified() {
+                    if SystemTime::now().duration_since(mtime).unwrap_or_default() < ttl {
+                        return telemetry_span::with_span_result(
+                            "load_inputs.item_list_cache_read",
+                            vec![KeyValue::new(
+                                "cache.path",
+                                cache_path.display().to_string(),
+                            )],
+                            || {
+                                let bytes = fs::read(&cache_path)?;
+                                let items: Vec<ItemListEntry> = serde_json::from_slice(&bytes)?;
+                                Ok(items)
+                            },
+                        );
+                    }
+                }
             }
-        }
-    }
 
-    let mut args = vec!["item", "list", "--format", "json"];
-    if let Some(v) = vault {
-        // `op item list --vault <name>` が使える環境想定（未対応なら削る）
-        args.push("--vault");
-        args.push(v);
-    }
+            let mut args = vec!["item", "list", "--format", "json"];
+            if let Some(v) = vault {
+                // `op item list --vault <name>` が使える環境想定（未対応なら削る）
+                args.push("--vault");
+                args.push(v);
+            }
 
-    let v = op_json(&args)?;
-    let items: Vec<ItemListEntry> = serde_json::from_value(v)?;
-    fs::create_dir_all(cache_path.parent().unwrap())?;
-    fs::write(&cache_path, serde_json::to_vec(&items)?)?;
-    Ok(items)
+            let items =
+                telemetry_span::with_span_result("load_inputs.item_list_fetch", vec![], || {
+                    let v = op_json(&args)?;
+                    let items: Vec<ItemListEntry> = serde_json::from_value(v)?;
+                    Ok(items)
+                })?;
+            telemetry_span::with_span_result(
+                "load_inputs.item_list_cache_write",
+                vec![KeyValue::new(
+                    "cache.path",
+                    cache_path.display().to_string(),
+                )],
+                || {
+                    fs::create_dir_all(cache_path.parent().unwrap())?;
+                    fs::write(&cache_path, serde_json::to_vec(&items)?)?;
+                    Ok(())
+                },
+            )?;
+            Ok(items)
+        },
+    )
 }
 
 fn item_list_cache_dir() -> Result<PathBuf> {
@@ -955,7 +1303,9 @@ fn invalidate_item_list_cache() -> Result<()> {
         return Ok(());
     }
 
-    for entry in fs::read_dir(&cache_dir).with_context(|| format!("read {}", cache_dir.display()))? {
+    for entry in
+        fs::read_dir(&cache_dir).with_context(|| format!("read {}", cache_dir.display()))?
+    {
         let entry = entry?;
         let path = entry.path();
         if !path.is_file() {
@@ -980,9 +1330,11 @@ fn invalidate_item_list_cache_best_effort() {
 }
 
 fn item_get(item_id: &str) -> Result<ItemGet> {
-    let v = op_json(&["item", "get", item_id, "--format", "json"])?;
-    let item: ItemGet = serde_json::from_value(v)?;
-    Ok(item)
+    telemetry_span::with_span_result("load_inputs.item_get", vec![], || {
+        let v = op_json(&["item", "get", item_id, "--format", "json"])?;
+        let item: ItemGet = serde_json::from_value(v)?;
+        Ok(item)
+    })
 }
 
 #[cfg(test)]
@@ -1732,10 +2084,7 @@ SINGLE='value # kept'
     #[test]
     fn test_show_output_string_plain() {
         let sections = vec![
-            (
-                "foo".to_string(),
-                vec!["A".to_string(), "B".to_string()],
-            ),
+            ("foo".to_string(), vec!["A".to_string(), "B".to_string()]),
             ("bar".to_string(), vec!["C".to_string()]),
         ];
 
@@ -1746,15 +2095,15 @@ SINGLE='value # kept'
     #[test]
     fn test_show_output_string_with_item() {
         let sections = vec![
-            (
-                "foo".to_string(),
-                vec!["A".to_string(), "B".to_string()],
-            ),
+            ("foo".to_string(), vec!["A".to_string(), "B".to_string()]),
             ("bar".to_string(), vec!["C".to_string()]),
         ];
 
         let rendered = show_output_string(&sections, true);
-        assert_eq!(rendered, "# --- item: foo ---\nA\nB\n\n# --- item: bar ---\nC\n");
+        assert_eq!(
+            rendered,
+            "# --- item: foo ---\nA\nB\n\n# --- item: bar ---\nC\n"
+        );
     }
 
     #[test]

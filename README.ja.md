@@ -198,6 +198,47 @@ sequenceDiagram
 
 **セキュリティ**: `opz` は secret へのアクセスと認証をすべて `op` CLI に委任します。アイテムリストはメタデータのみを 60 秒間キャッシュします。
 
+## Tracing（OpenTelemetry + Jaeger）
+
+`opz` は OTLP trace 出力に対応していますが、デフォルトでは無効です。`OTEL_EXPORTER_OTLP_ENDPOINT` が未設定の場合は no-op として動作します。
+
+### ローカル手順
+
+```bash
+just jaeger-up
+just trace-run item=<your-item-title>
+just trace-ui
+```
+
+### E2E trace を Jaeger で見る
+
+`tests/e2e_real_op.rs` が生成する trace を確認したい場合:
+
+```bash
+just jaeger-up
+just e2e-trace
+just trace-ui
+```
+
+Jaeger の Search で service `opz-e2e` を選択してください。
+
+Jaeger の Search で service `opz`（または `OTEL_SERVICE_NAME`）を選び、以下の span を確認できます:
+
+* `cli.<command>`（root）
+* `parse_args`
+* `load_config`
+* `load_inputs`
+* `main_operation`
+* `write_outputs`
+
+### 環境変数
+
+* `OTEL_EXPORTER_OTLP_ENDPOINT` - 設定時のみ OTLP export を有効化（例: `http://localhost:4317`）
+* `OTEL_SERVICE_NAME` - service 名の任意上書き（デフォルト: `opz`）
+* `OTEL_TRACES_SAMPLER` - sampler 設定（`always_on`, `traceidratio` など）
+* `OTEL_TRACES_SAMPLER_ARG` - ratio sampler 用パラメータ
+* `OPZ_TRACE_CAPTURE_ARGS` - `1` のときのみサニタイズ済み `cli.args` を属性記録（デフォルト: 無効）
+
 ## 要件
 
 * [1Password CLI](https://developer.1password.com/docs/cli/) (`op`) がインストールされ、認証されていること
