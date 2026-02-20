@@ -22,6 +22,12 @@ trace-report ref service='opz-e2e' limit='200':
 trace-compare base head service='opz-e2e' limit='200':
     python3 scripts/jaeger_trace_compare.py --service {{service}} --limit {{limit}} compare --base {{base}} --head {{head}}
 
+trace-report-samples ref samples='5' status='ok' service='opz-e2e' limit='1000':
+    python3 scripts/jaeger_trace_compare.py --service {{service}} --limit {{limit}} --samples {{samples}} --status {{status}} report --commit {{ref}}
+
+trace-compare-samples base head samples='5' status='ok' service='opz-e2e' limit='1000':
+    python3 scripts/jaeger_trace_compare.py --service {{service}} --limit {{limit}} --samples {{samples}} --status {{status}} compare --base {{base}} --head {{head}}
+
 jaeger-up:
     docker compose up -d
 

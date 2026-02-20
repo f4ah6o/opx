@@ -240,6 +240,16 @@ just trace-compare <base-ref-or-version> <head-ref-or-version>
 `<ref-or-version>` accepts commit hash, git tag (for example `v2026.2.5`), or `service.version` (for example `2026.2.5`).
 Both commands print markdown tables (duration and top child span) for easy copy into PRs.
 
+For less noisy comparisons, aggregate multiple runs and ignore failed traces:
+
+```bash
+just trace-report-samples <ref-or-version> samples=5 status=ok
+just trace-compare-samples <base-ref-or-version> <head-ref-or-version> samples=5 status=ok
+```
+
+`samples` uses latest N traces per operation and reports median/average.
+`status` can be `all`, `ok`, or `error`.
+
 Then open Jaeger Search and select service `opz` (or your `OTEL_SERVICE_NAME`) to inspect spans such as:
 
 * `cli.<command>` (root)

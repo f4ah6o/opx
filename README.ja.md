@@ -235,6 +235,16 @@ just trace-compare <base-ref-or-version> <head-ref-or-version>
 `<ref-or-version>` には commit hash、git tag（例: `v2026.2.5`）、`service.version`（例: `2026.2.5`）を指定できます。
 どちらも markdown テーブル（duration と最長 child span）を標準出力します。
 
+比較ノイズを減らすには、複数サンプル集計＋失敗トレース除外を使います:
+
+```bash
+just trace-report-samples <ref-or-version> samples=5 status=ok
+just trace-compare-samples <base-ref-or-version> <head-ref-or-version> samples=5 status=ok
+```
+
+`samples` は operation ごとの最新 N 件を集計し、中央値/平均を出力します。
+`status` は `all` / `ok` / `error` を指定できます。
+
 Jaeger の Search で service `opz`（または `OTEL_SERVICE_NAME`）を選び、以下の span を確認できます:
 
 * `cli.<command>`（root）

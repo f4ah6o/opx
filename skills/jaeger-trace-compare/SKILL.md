@@ -33,15 +33,23 @@ just trace-report <ref-or-version>
 just trace-compare <base-ref-or-version> <head-ref-or-version>
 ```
 
+4. For stable numbers, use multi-sample aggregation:
+
+```bash
+just trace-report-samples <ref-or-version> samples=5 status=ok
+just trace-compare-samples <base-ref-or-version> <head-ref-or-version> samples=5 status=ok
+```
+
 ## Output
 
 `trace-report` and `trace-compare` print markdown tables that can be pasted into PR comments and release notes.
 
 ## Troubleshooting
 
-- If no traces are found: increase fetch limit with `limit=500`.
+- If no traces are found: increase fetch limit with `limit=1000`.
 - If ref not matched: pass a longer commit prefix or explicit tag.
 - If service differs: pass `service=<name>`.
+- If failures skew results: set `status=ok`.
 
 ## Reference
 
