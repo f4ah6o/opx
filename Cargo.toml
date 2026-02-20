@@ -1,6 +1,6 @@
 [package]
 name = "opz"
-version = "2026.2.5"
+version = "2026.2.6"
 edition = "2021"
 description = "1Password CLI wrapper for seamless secret injection into commands"
 license = "MIT"
